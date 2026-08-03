@@ -780,9 +780,21 @@ sources_emit() {
 		done
 }
 
+# Firewall zones for the form, as "name=networks" lines.
+zones_emit() {
+	uci -q show firewall 2>/dev/null |
+		sed -n "s/^firewall\.\([^.]*\)\.name='\(.*\)'\$/\1 \2/p" |
+		while read -r section name; do
+			[ "$(uci -q get "firewall.$section" 2>/dev/null)" = zone ] || continue
+			printf '%s=%s\n' "$name" \
+				"$(uci -q get "firewall.$section.network" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')"
+		done
+}
+
 case "${1:-}" in
 	apply) with_lock apply_impl ;;
 	sources) sources_emit ;;
+	zones) zones_emit ;;
 	disable) with_lock disable_impl ;;
 	connect) with_lock connect_source ;;
 	secret-set) with_lock consume_secret_input "${2:-}" ;;
@@ -790,5 +802,5 @@ case "${1:-}" in
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;
 	render) if [ "$(role)" = exit ]; then render_exit; else render_source; fi ;;
-	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|status|check|sources|monitor|render}' ;;
+	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|status|check|sources|zones|monitor|render}' ;;
 esac

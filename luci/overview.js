@@ -17,6 +17,21 @@ function parseNamedValues(output) {
 	}).filter(Boolean);
 }
 
+// Mirrors the runtime's own checks, so the page refuses what apply would.
+function validIfId(value, otherOption) {
+	if (!/^\d+$/.test(String(value || '')))
+		return _('Enter a number.');
+	var number = Number(value);
+	if (number < 1 || number > 4294967295)
+		return _('Must be between 1 and 4294967295.');
+	if (number === 42 || number === 43)
+		return _('42 and 43 are reserved by IKEv2 Manager.');
+	var other = uci.get('ikev2-site-link', 'main', otherOption);
+	if (other && Number(other) === number)
+		return _('The source and exit identifiers must differ.');
+	return true;
+}
+
 function parse(output) {
 	var result = {};
 	String(output || '').split(/\n/).forEach(function(line) {
@@ -71,13 +86,16 @@ return view.extend({
 		return Promise.all([
 			L.resolveDefault(fs.exec(helper, [ 'status' ]), { code: 1, stdout: '' }),
 			uci.load('ikev2-site-link'),
-			L.resolveDefault(fs.exec(helper, [ 'sources' ]), { code: 1, stdout: '' })
+			L.resolveDefault(fs.exec(helper, [ 'sources' ]), { code: 1, stdout: '' }),
+			L.resolveDefault(fs.exec(helper, [ 'zones' ]), { code: 1, stdout: '' })
 		]);
 	},
 
 	render: function(data) {
+		var self = this;
 		var status = parse(data[0] && data[0].stdout);
 		var sources = parseNamedValues(data[2] && data[2].stdout);
+		var zones = parseNamedValues(data[3] && data[3].stdout);
 		common.styles();
 		var map = new form.Map('ikev2-site-link', null, null);
 		var option;
@@ -105,7 +123,14 @@ return view.extend({
 
 		option = link.option(form.Value, 'peer_user', _('Peer identity'));
 		option.rmempty = false;
-		option.datatype = 'uciname';
+		// Not a UCI name: the runtime accepts letters, digits and _ . @ -,
+		// which is what an EAP identity like site-link-office needs.
+		option.validate = function(section_id, value) {
+			if (!value)
+				return _('A peer identity is required.');
+			return /^[A-Za-z0-9_.@-]+$/.test(value) ? true :
+				_('Use letters, digits and _ . @ - only.');
+		};
 		option.description = _('EAP identity this link authenticates with. It must exist on the exit router and be used by nothing else.');
 
 		option = link.option(form.Value, 'ike_port', _('Dedicated external IKE port'));
@@ -183,21 +208,76 @@ return view.extend({
 		option.rmempty = false;
 		option.description = _('Minimum time between connection attempts. This prevents restart storms while the peer is unavailable.');
 
-		var section = map.section(form.NamedSection, 'main', 'main', _('Credentials and actions'));
-		section.addremove = false;
+		// Everything the runtime reads but the page never showed. These have
+		// working defaults and are rarely touched, so they live apart from the
+		// settings above rather than being hidden from the admin entirely.
+		var advanced = map.section(form.NamedSection, 'main', 'main', _('Interfaces and identifiers'));
+		advanced.addremove = false;
 
-		var secret = section.option(form.DummyValue, '_secret', _('Peer secret'));
-		secret.rawhtml = true;
-		secret.cfgvalue = function() {
-			return '<input class="cbi-input-password" id="site-link-secret" type="password" autocomplete="new-password" placeholder="' +
-				_('Leave empty to keep the current secret') + '">';
-		};
+		function zoneOption(name, title, fallback, description) {
+			var opt = advanced.option(form.Value, name, title);
+			opt.placeholder = fallback;
+			opt.description = description;
+			zones.forEach(function(zone) {
+				opt.value(zone.name, zone.name + (zone.value ? ' — ' + zone.value : ''));
+			});
+			return opt;
+		}
 
-		var saveSecret = section.option(form.Button, '_secret_apply', _('Update peer secret'));
-		saveSecret.inputstyle = 'action';
-		saveSecret.onclick = function() {
-			var node = document.getElementById('site-link-secret');
-			var value = node ? node.value : '';
+		option = advanced.option(form.Value, 'interface', _('Link network'));
+		option.depends('role', 'source');
+		option.value('sitehome', 'sitehome — ' + _('default'));
+		option.description = _('UCI network and firewall zone this link creates on the source router.');
+
+		option = advanced.option(form.Value, 'xfrm_device', _('Link device'));
+		option.depends('role', 'source');
+		option.value('ipsec-home', 'ipsec-home — ' + _('default'));
+
+		option = advanced.option(form.Value, 'if_id', _('XFRM identifier'));
+		option.depends('role', 'source');
+		option.value('44', '44 — ' + _('default'));
+		option.description = _('42 and 43 are reserved by IKEv2 Manager. It must differ from the exit identifier.');
+		option.validate = function(section_id, value) { return validIfId(value, 'exit_if_id'); };
+
+		option = advanced.option(form.Value, 'exit_interface', _('Exit network'));
+		option.depends('role', 'exit');
+		option.value('siteexit', 'siteexit — ' + _('default'));
+		option.description = _('UCI network and firewall zone this link creates on the exit router.');
+
+		option = advanced.option(form.Value, 'exit_device', _('Exit device'));
+		option.depends('role', 'exit');
+		option.value('ipsec-site-exit', 'ipsec-site-exit — ' + _('default'));
+
+		option = advanced.option(form.Value, 'exit_if_id', _('Exit XFRM identifier'));
+		option.depends('role', 'exit');
+		option.value('45', '45 — ' + _('default'));
+		option.description = _('42 and 43 are reserved by IKEv2 Manager. It must differ from the source identifier.');
+		option.validate = function(section_id, value) { return validIfId(value, 'if_id'); };
+
+		zoneOption('inbound_zone', _('Inbound VPN zone'), 'ikev2in',
+			_('Zone whose clients may also use the link. Skipped when the zone does not exist.'))
+			.depends('role', 'source');
+
+		zoneOption('exit_wan', _('Exit uplink zone'), 'wan',
+			_('The only zone the link may forward to on the exit router.'))
+			.depends('role', 'exit');
+
+		option = advanced.option(form.Value, 'dpd', _('Dead peer detection'));
+		option.value('20', '20 ' + _('seconds') + ' — ' + _('default'));
+		option.value('30', '30 ' + _('seconds'));
+		option.value('60', '60 ' + _('seconds'));
+		option.datatype = 'range(5,300)';
+
+		option = advanced.option(form.Flag, 'force_tcp', _('Force TCP for selected traffic'));
+		option.depends('role', 'source');
+		option.default = '1';
+		option.description = _('Rejects UDP/443 to the selected destinations so clients fall back to TCP immediately instead of waiting out a QUIC timeout.');
+
+		// The secret and the two operations that use it are an action bar, not
+		// three labelled settings rows: the secret is write-only and is never
+		// read back from UCI, and both buttons act on the whole page.
+		function updateSecret(input) {
+			var value = input.value;
 			if (!value)
 				return Promise.reject(new Error(_('Enter a peer secret first.')));
 			var bytes = new TextEncoder().encode(value);
@@ -210,14 +290,12 @@ return view.extend({
 			}).then(function(result) {
 				if (result.code)
 					throw new Error(result.stderr || _('Unable to update the peer secret.'));
-				node.value = '';
+				input.value = '';
 				ui.addNotification(null, E('p', {}, [ _('Peer secret updated.') ]), 'info');
 			});
-		};
+		}
 
-		var actions = section.option(form.Button, '_apply', _('Apply and connect'));
-		actions.inputstyle = 'apply';
-		actions.onclick = function() {
+		function applyAndConnect() {
 			return map.save().then(function() {
 				return fs.exec(helper, [ 'apply' ]);
 			}).then(function(result) {
@@ -225,7 +303,35 @@ return view.extend({
 					throw new Error(result.stderr || _('Apply failed.'));
 				window.location.reload();
 			});
-		};
+		}
+
+		function actionBar() {
+			var input = E('input', {
+				'type': 'password',
+				'autocomplete': 'new-password',
+				'placeholder': _('Leave empty to keep the current secret')
+			});
+			return E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ _('Peer secret and actions') ]),
+				E('p', { 'class': 'cbi-value-description' }, [
+					_('The secret is shared with the exit router and is never stored in the configuration or shown here. Settings above are saved by "Apply and connect".')
+				]),
+				E('div', { 'class': 'ikev2-actions' }, [
+					E('div', { 'class': 'ikev2-field' }, [
+						E('label', {}, [ _('New peer secret') ]),
+						input
+					]),
+					E('button', {
+						'class': 'cbi-button cbi-button-action',
+						'click': ui.createHandlerFn(self, function() { return updateSecret(input); })
+					}, [ _('Update secret') ]),
+					E('button', {
+						'class': 'cbi-button cbi-button-apply',
+						'click': ui.createHandlerFn(self, applyAndConnect)
+					}, [ _('Apply and connect') ])
+				])
+			]);
+		}
 
 		return map.render().then(function(node) {
 			return E('div', { 'class': 'ikev2-page' }, [
@@ -238,8 +344,16 @@ return view.extend({
 					])
 				]),
 				statusPanel(status),
-				node
+				node,
+				actionBar()
 			]);
 		});
-	}
+	},
+
+	// The page applies through its own button, which also runs the helper.
+	// Leaving LuCI's stock footer in place would show a second, competing
+	// Save/Apply pair that does not connect the link.
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
 });
