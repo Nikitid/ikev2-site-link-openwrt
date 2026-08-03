@@ -15,6 +15,16 @@ grep -q '^googlevideo.com$' "$root/openwrt/files/etc/ikev2-site-link/youtube-dom
 grep -q '^youtube.com$' "$root/openwrt/files/etc/ikev2-site-link/youtube-domains.txt"
 grep -Fq "firewall.ikev2_site_link_ike.dest_port='4500'" \
 	"$root/runtime/ikev2-site-link.sh"
+
+# A dropped UDP/443 datagram costs the client a full QUIC handshake timeout
+# before it falls back to TCP. The rule must reject, and it must sit in a hook
+# where nftables honours reject.
+grep -Fq 'reject with icmp type port-unreachable' "$root/runtime/pbr.user.site-link"
+grep -Fq 'insert rule inet fw4 pbr_forward' "$root/runtime/pbr.user.site-link"
+if grep -Eq 'udp dport 443 counter drop' "$root/runtime/pbr.user.site-link"; then
+	echo 'UDP/443 is dropped instead of rejected' >&2
+	exit 1
+fi
 if grep -Eq '^(google\.com|googleapis\.com|googleusercontent\.com|cloudfront\.net|cloudflare\.com)$' \
 	"$root/openwrt/files/etc/ikev2-site-link/youtube-domains.txt"; then
 	echo 'generic domain found in the YouTube list' >&2
