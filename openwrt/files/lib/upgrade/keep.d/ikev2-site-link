@@ -1,0 +1,3 @@
+/etc/config/ikev2-site-link
+/etc/ikev2-site-link/youtube-domains.txt
+/etc/ikev2-site-link/client.secret
