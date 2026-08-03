@@ -46,6 +46,18 @@ node -e 'new Function("window", "document", "L", "baseclass", require("fs").read
 grep -q "^'require baseclass';" "$root/luci/shared.js"
 grep -q 'return baseclass.extend(' "$root/luci/shared.js"
 
+# Source selectors are offered from the router's own devices, and the list is
+# stored as one space-separated UCI option, so both overrides must stay.
+grep -Fq "section.option(form.DynamicList, 'source_devices'" \
+	"$root/luci/overview.js" ||
+	grep -Fq "sourceRole.option(form.DynamicList, 'source_devices'" \
+		"$root/luci/overview.js"
+grep -Fq 'option.cfgvalue = function(section_id)' "$root/luci/overview.js"
+grep -Fq 'option.write = function(section_id, value)' "$root/luci/overview.js"
+grep -Fq "fs.exec(helper, [ 'sources' ])" "$root/luci/overview.js"
+grep -Fq '"/usr/libexec/ikev2-site-link sources"' "$root/luci/acl.json"
+grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
+
 "$root/scripts/test-runtime.sh"
 
 printf 'checks OK\n'

@@ -751,8 +751,38 @@ monitor_loop() {
 	done
 }
 
+# Candidate PBR source selectors for the LuCI form, as "device=hint" lines.
+# Enumerated here rather than over ubus so the page needs no broader ACL than
+# the status commands it already runs.
+sources_emit() {
+	own="$(getv xfrm_device ipsec-home)"
+	exit_own="$(getv exit_device ipsec-site-exit)"
+	wan_device="$(ip -4 route show default 2>/dev/null |
+		awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "dev") print $(i + 1) }')"
+	ip -o link show up 2>/dev/null |
+		awk -F': ' '{ print $2 }' |
+		sed 's/@.*//' |
+		while IFS= read -r device; do
+			[ -n "$device" ] || continue
+			case "$device" in
+				lo | "$own" | "$exit_own" | "$wan_device") continue ;;
+			esac
+			name="$(uci -q show network 2>/dev/null |
+				sed -n "s/^network\.\([^.]*\)\.device='$device'\$/\1/p" | head -n1)"
+			address="$(ip -4 -o addr show dev "$device" scope global 2>/dev/null |
+				awk 'NR == 1 { print $4 }')"
+			# Switch ports and radio interfaces carry no routable source
+			# traffic of their own; a candidate needs a configured network
+			# or an address to be a meaningful selector.
+			[ -n "$name" ] || [ -n "$address" ] || continue
+			hint="$(printf '%s %s' "$name" "$address" | sed 's/^ *//; s/ *$//')"
+			printf '%s=%s\n' "$device" "$hint"
+		done
+}
+
 case "${1:-}" in
 	apply) with_lock apply_impl ;;
+	sources) sources_emit ;;
 	disable) with_lock disable_impl ;;
 	connect) with_lock connect_source ;;
 	secret-set) with_lock consume_secret_input "${2:-}" ;;
@@ -760,5 +790,5 @@ case "${1:-}" in
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;
 	render) if [ "$(role)" = exit ]; then render_exit; else render_source; fi ;;
-	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|status|check|monitor|render}' ;;
+	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|status|check|sources|monitor|render}' ;;
 esac
