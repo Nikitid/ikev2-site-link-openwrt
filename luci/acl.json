@@ -5,7 +5,8 @@
 			"uci": [ "ikev2-site-link" ],
 			"file": {
 				"/usr/libexec/ikev2-site-link status": [ "exec" ],
-				"/usr/libexec/ikev2-site-link check": [ "exec" ]
+				"/usr/libexec/ikev2-site-link check": [ "exec" ],
+				"/usr/libexec/ikev2-site-link sources": [ "exec" ]
 			},
 			"ubus": {
 				"file": [ "exec", "read", "stat" ]
