@@ -6,7 +6,8 @@
 			"file": {
 				"/usr/libexec/ikev2-site-link status": [ "exec" ],
 				"/usr/libexec/ikev2-site-link check": [ "exec" ],
-				"/usr/libexec/ikev2-site-link sources": [ "exec" ]
+				"/usr/libexec/ikev2-site-link sources": [ "exec" ],
+				"/usr/libexec/ikev2-site-link zones": [ "exec" ]
 			},
 			"ubus": {
 				"file": [ "exec", "read", "stat" ]

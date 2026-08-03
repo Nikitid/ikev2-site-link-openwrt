@@ -56,6 +56,8 @@ grep -Fq 'option.cfgvalue = function(section_id)' "$root/luci/overview.js"
 grep -Fq 'option.write = function(section_id, value)' "$root/luci/overview.js"
 grep -Fq "fs.exec(helper, [ 'sources' ])" "$root/luci/overview.js"
 grep -Fq '"/usr/libexec/ikev2-site-link sources"' "$root/luci/acl.json"
+grep -Fq '"/usr/libexec/ikev2-site-link zones"' "$root/luci/acl.json"
+grep -Fq 'zones) zones_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
 
 "$root/scripts/test-runtime.sh"
