@@ -1,0 +1,30 @@
+{
+	"luci-app-ikev2-site-link": {
+		"description": "Manage and monitor an IKEv2 site link",
+		"read": {
+			"uci": [ "ikev2-site-link" ],
+			"file": {
+				"/usr/libexec/ikev2-site-link status": [ "exec" ],
+				"/usr/libexec/ikev2-site-link check": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec", "read", "stat" ]
+			}
+		},
+		"write": {
+			"uci": [ "ikev2-site-link" ],
+			"file": {
+				"/var/run/ikev2-site-link-secret-*.in": [ "write" ],
+				"/usr/libexec/ikev2-site-link apply": [ "exec" ],
+				"/usr/libexec/ikev2-site-link disable": [ "exec" ],
+				"/usr/libexec/ikev2-site-link connect": [ "exec" ],
+				"/usr/libexec/ikev2-site-link secret-set *": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec", "write" ],
+				"uci": [ "commit", "set" ]
+			}
+		}
+	}
+}
+

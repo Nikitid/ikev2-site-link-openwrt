@@ -1,0 +1,50 @@
+#!/bin/sh
+
+site_link_pbr_main() {
+site_link_interface="$(uci -q get ikev2-site-link.main.interface || echo sitehome)"
+site_link_device="$(uci -q get ikev2-site-link.main.xfrm_device || echo ipsec-home)"
+site_link_table="pbr_$site_link_interface"
+site_link_force_tcp="$(uci -q get ikev2-site-link.main.force_tcp || echo 1)"
+site_link_set="pbr_${site_link_interface}_4_dst_ip_ikev2_site_link"
+site_link_comment='ikev2-site-link-force-youtube-tcp'
+site_link_nft='/usr/sbin/nft'
+
+# PBR strict enforcement creates an unmetered unreachable default before it
+# sources custom includes. Remove every copy so the live route can win, then
+# install our own high-metric terminal route for fail-closed fallback.
+while ip -4 route del unreachable default table "$site_link_table" 2>/dev/null; do
+	:
+done
+ip -4 route replace unreachable default metric 32767 table "$site_link_table" 2>/dev/null ||
+	return 0
+
+if ip link show "$site_link_device" 2>/dev/null | grep -q 'UP' &&
+	ip -4 -o addr show dev "$site_link_device" scope global 2>/dev/null | grep -q . &&
+	swanctl --list-sas --raw 2>/dev/null |
+	grep -Eq 'site-link4-[0-9]+ .*name=site-link4 .*state=INSTALLED'; then
+	ip -4 route replace default dev "$site_link_device" metric 10 table "$site_link_table"
+else
+	ip -4 route del default dev "$site_link_device" table "$site_link_table" 2>/dev/null || true
+fi
+
+"$site_link_nft" -a list chain inet fw4 pbr_prerouting 2>/dev/null |
+	awk -v comment="$site_link_comment" 'index($0, comment) && /handle/ { print $NF }' |
+	while IFS= read -r site_link_handle; do
+		case "$site_link_handle" in '' | *[!0-9]*) continue ;; esac
+		"$site_link_nft" delete rule inet fw4 pbr_prerouting handle "$site_link_handle" \
+			2>/dev/null || true
+	done
+
+if [ "$site_link_force_tcp" = 1 ] &&
+	"$site_link_nft" list set inet fw4 "$site_link_set" >/dev/null 2>&1; then
+	"$site_link_nft" insert rule inet fw4 pbr_prerouting \
+		ip daddr "@$site_link_set" udp dport 443 counter drop \
+		comment "$site_link_comment"
+fi
+
+return 0
+}
+
+# PBR sources this file while building its ruleset; the monitor also executes
+# it directly after a CHILD_SA or VIP state change.
+site_link_pbr_main "$@"
