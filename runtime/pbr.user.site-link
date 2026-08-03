@@ -27,19 +27,33 @@ else
 	ip -4 route del default dev "$site_link_device" table "$site_link_table" 2>/dev/null || true
 fi
 
-"$site_link_nft" -a list chain inet fw4 pbr_prerouting 2>/dev/null |
-	awk -v comment="$site_link_comment" 'index($0, comment) && /handle/ { print $NF }' |
-	while IFS= read -r site_link_handle; do
-		case "$site_link_handle" in '' | *[!0-9]*) continue ;; esac
-		"$site_link_nft" delete rule inet fw4 pbr_prerouting handle "$site_link_handle" \
-			2>/dev/null || true
-	done
+# pbr_prerouting is cleaned as well: releases before 0.2.4 installed the rule
+# there, and an upgrade must not leave the old copy behind.
+for site_link_chain in pbr_prerouting pbr_forward; do
+	"$site_link_nft" -a list chain inet fw4 "$site_link_chain" 2>/dev/null |
+		awk -v comment="$site_link_comment" 'index($0, comment) && /handle/ { print $NF }' |
+		while IFS= read -r site_link_handle; do
+			case "$site_link_handle" in '' | *[!0-9]*) continue ;; esac
+			"$site_link_nft" delete rule inet fw4 "$site_link_chain" handle "$site_link_handle" \
+				2>/dev/null || true
+		done
+done
 
+# QUIC must fail loudly, not silently. A dropped UDP/443 datagram makes the
+# client wait out its own QUIC handshake timeout before falling back to TCP,
+# which is seconds of added latency on every new destination. An ICMP port
+# unreachable makes that fallback immediate.
+#
+# nftables only honours reject in the input, forward and output hooks, so the
+# rule lives in pbr_forward, reached from fw4's mangle_forward. It is inserted
+# rather than appended because pbr_forward returns early for packets that PBR
+# has already marked, which is exactly this traffic.
 if [ "$site_link_force_tcp" = 1 ] &&
 	"$site_link_nft" list set inet fw4 "$site_link_set" >/dev/null 2>&1; then
-	"$site_link_nft" insert rule inet fw4 pbr_prerouting \
-		ip daddr "@$site_link_set" udp dport 443 counter drop \
-		comment "$site_link_comment"
+	"$site_link_nft" insert rule inet fw4 pbr_forward \
+		ip daddr "@$site_link_set" udp dport 443 counter \
+		reject with icmp type port-unreachable \
+		comment "$site_link_comment" 2>/dev/null || true
 fi
 
 return 0
