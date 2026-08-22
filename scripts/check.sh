@@ -80,6 +80,11 @@ grep -Fq 'zones) zones_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'policy-reload) with_lock policy-reload policy_reload_impl ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'file://$domains_file file://$addresses_file' "$root/runtime/ikev2-site-link.sh"
+if sed -n '/^policy_configuration_ready()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Eq '" = *$'; then
+	echo 'unterminated policy comparison found' >&2
+	exit 1
+fi
 grep -Fq 'user_services_dir="${SITE_LINK_POLICY_USER_SERVICES_DIR:-/etc/ikev2-site-link/services.d}"' \
 	"$root/runtime/ikev2-site-link-policy.sh"
 grep -Fxq youtube "$root/openwrt/files/etc/ikev2-site-link/services.selected.txt"
