@@ -57,6 +57,8 @@ fi
 node -e 'new Function("window", "document", "L", "baseclass", require("fs").readFileSync(process.argv[1], "utf8"))' \
 	"$root/luci/overview.js"
 node -e 'new Function("window", "document", "L", "baseclass", require("fs").readFileSync(process.argv[1], "utf8"))' \
+	"$root/luci/policy.js"
+node -e 'new Function("window", "document", "L", "baseclass", require("fs").readFileSync(process.argv[1], "utf8"))' \
 	"$root/luci/shared.js"
 
 # LuCI require() rejects any module whose factory does not return a Class subclass.
@@ -76,8 +78,14 @@ grep -Fq '"/usr/libexec/ikev2-site-link sources"' "$root/luci/acl.json"
 grep -Fq '"/usr/libexec/ikev2-site-link zones"' "$root/luci/acl.json"
 grep -Fq 'zones) zones_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'policy-reload) with_lock policy-reload policy_reload_impl ;;' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'file://$domains_file file://$addresses_file' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'user_services_dir="${SITE_LINK_POLICY_USER_SERVICES_DIR:-/etc/ikev2-site-link/services.d}"' \
+	"$root/runtime/ikev2-site-link-policy.sh"
+grep -Fxq youtube "$root/openwrt/files/etc/ikev2-site-link/services.selected.txt"
 
 "$root/scripts/test-runtime.sh"
+"$root/scripts/test-policy.sh"
 "$root/scripts/test-recovery.sh"
 
 printf 'checks OK\n'

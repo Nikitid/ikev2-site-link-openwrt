@@ -58,6 +58,13 @@ var CSS = `
 .ikev2-actions .ikev2-field{display:flex;flex-direction:column;gap:.3rem;min-width:16rem;max-width:24rem;flex:1 1 16rem}
 .ikev2-actions label{font-size:.78rem;font-weight:650;color:var(--ikev2-muted)}
 .ikev2-actions input{height:2.15rem;padding:0 .6rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius-sm);background:var(--ikev2-surface);width:100%}
+.ikev2-policy-section{margin:0 0 1rem;padding:1.1rem 1.2rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:var(--ikev2-surface);box-shadow:var(--ikev2-shadow)}
+.ikev2-policy-section h3{margin:0 0 .35rem}.ikev2-policy-section>p{margin:.25rem 0 1rem;color:var(--ikev2-muted);line-height:1.5}
+.ikev2-chip-group{margin:.8rem 0}.ikev2-chip-group h4{margin:0 0 .45rem;font-size:.82rem;color:var(--ikev2-muted)}
+.ikev2-chips{display:flex;flex-wrap:wrap;gap:.45rem}.ikev2-chip{display:inline-flex;align-items:center;gap:.38rem;padding:.42rem .7rem;border:1px solid var(--ikev2-border);border-radius:999px;cursor:pointer;background:var(--ikev2-surface)}
+.ikev2-chip.selected{border-color:var(--ikev2-accent);background:color-mix(in srgb,var(--ikev2-accent) 13%,transparent)}.ikev2-chip.broad{border-style:dashed}.ikev2-chip input{margin:0}.ikev2-chip-mark{font-size:.68rem;font-weight:750;color:var(--ikev2-warn)}
+.ikev2-policy-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.ikev2-policy-grid textarea,.ikev2-service-grid textarea{width:100%;min-height:13rem;font-family:monospace}.ikev2-service-grid{display:grid;grid-template-columns:minmax(11rem,.35fr) 1fr;gap:.75rem;align-items:start}.ikev2-service-grid label{font-weight:650;color:var(--ikev2-muted)}.ikev2-service-grid input,.ikev2-service-grid select,.ikev2-service-grid textarea{width:100%}.ikev2-status-box{white-space:pre-wrap;margin:.75rem 0 0;padding:.7rem;border-radius:var(--ikev2-radius-sm);background:rgba(128,128,128,.1)}
+@media(max-width:760px){.ikev2-policy-grid,.ikev2-service-grid{grid-template-columns:1fr}}
 @media(max-width:900px){.ikev2-card{grid-column:span 6}.ikev2-hero{grid-template-columns:1fr}.ikev2-hero-side{justify-content:flex-start}}
 @media(max-width:560px){.ikev2-header{display:block}.ikev2-card{grid-column:1/-1}.ikev2-grid{gap:.7rem}.ikev2-hero{padding:1.1rem}}
 `;

@@ -4,10 +4,17 @@
 		"read": {
 			"uci": [ "ikev2-site-link" ],
 			"file": {
+				"/etc/ikev2-site-link/domains.manual.txt": [ "read" ],
+				"/etc/ikev2-site-link/addresses.manual.txt": [ "read" ],
+				"/etc/ikev2-site-link/services.selected.txt": [ "read" ],
+				"/tmp/ikev2-site-link-policy.status": [ "read" ],
 				"/usr/libexec/ikev2-site-link status": [ "exec" ],
 				"/usr/libexec/ikev2-site-link check": [ "exec" ],
 				"/usr/libexec/ikev2-site-link sources": [ "exec" ],
-				"/usr/libexec/ikev2-site-link zones": [ "exec" ]
+				"/usr/libexec/ikev2-site-link zones": [ "exec" ],
+				"/usr/libexec/ikev2-site-link-policy services": [ "exec" ],
+				"/usr/libexec/ikev2-site-link-policy service-read *": [ "exec" ],
+				"/usr/libexec/ikev2-site-link-policy status *": [ "exec" ]
 			},
 			"ubus": {
 				"file": [ "exec", "read", "stat" ]
@@ -17,10 +24,18 @@
 			"uci": [ "ikev2-site-link" ],
 			"file": {
 				"/var/run/ikev2-site-link-secret-*.in": [ "write" ],
+				"/tmp/ikev2-site-link-policy-input-*.domains": [ "write" ],
+				"/tmp/ikev2-site-link-policy-input-*.cidrs": [ "write" ],
+				"/tmp/ikev2-site-link-policy-input-*.services": [ "write" ],
+				"/tmp/ikev2-site-link-service-input-*.meta": [ "write" ],
+				"/tmp/ikev2-site-link-service-input-*.domains": [ "write" ],
+				"/tmp/ikev2-site-link-service-input-*.cidrs": [ "write" ],
 				"/usr/libexec/ikev2-site-link apply": [ "exec" ],
 				"/usr/libexec/ikev2-site-link disable": [ "exec" ],
 				"/usr/libexec/ikev2-site-link connect": [ "exec" ],
-				"/usr/libexec/ikev2-site-link secret-set *": [ "exec" ]
+				"/usr/libexec/ikev2-site-link secret-set *": [ "exec" ],
+				"/usr/libexec/ikev2-site-link-policy schedule *": [ "exec" ],
+				"/usr/libexec/ikev2-site-link-policy service-schedule *": [ "exec" ]
 			},
 			"ubus": {
 				"file": [ "exec", "write" ],
@@ -29,4 +44,3 @@
 		}
 	}
 }
-

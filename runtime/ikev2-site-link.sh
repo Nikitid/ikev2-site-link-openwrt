@@ -7,7 +7,8 @@ config_name="${SITE_LINK_CONFIG:-ikev2-site-link}"
 uci_dir="${SITE_LINK_UCI_DIR:-/etc/config}"
 state_file="${SITE_LINK_STATE:-/var/run/ikev2-site-link.status}"
 secret_file="${SITE_LINK_SECRET:-/etc/ikev2-site-link/client.secret}"
-domains_file="${SITE_LINK_DOMAINS:-/etc/ikev2-site-link/youtube-domains.txt}"
+domains_file="${SITE_LINK_DOMAINS:-/etc/ikev2-site-link/domains.txt}"
+addresses_file="${SITE_LINK_ADDRESSES:-/etc/ikev2-site-link/addresses.txt}"
 conn_file="${SITE_LINK_CONN:-/etc/swanctl/conf.d/40-site-link.conf}"
 cred_file="${SITE_LINK_CRED:-/etc/swanctl/conf.d/92-site-link-secret.conf}"
 exit_conn_file="${SITE_LINK_EXIT_CONN:-/etc/swanctl/conf.d/41-site-link-exit.conf}"
@@ -554,10 +555,10 @@ source_uci_apply() {
 		uci add_list "pbr.config.supported_interface=$interface"
 	fi
 	uci set pbr.ikev2_site_link=policy
-	uci set pbr.ikev2_site_link.name='IKEv2 Site Link: YouTube'
+	uci set pbr.ikev2_site_link.name='IKEv2 Site Link: selected services'
 	uci set pbr.ikev2_site_link.interface="$interface"
 	uci set pbr.ikev2_site_link.src_addr="$sources"
-	uci set pbr.ikev2_site_link.dest_addr="file://$domains_file"
+	uci set pbr.ikev2_site_link.dest_addr="file://$domains_file file://$addresses_file"
 	uci set pbr.ikev2_site_link.proto='all'
 	uci set pbr.ikev2_site_link.enabled=1
 	# The narrow site-link policy must win before broader application policies
@@ -898,7 +899,55 @@ source_conn_loaded() {
 source_pbr_ready() {
 	"$pbr_init" running >/dev/null 2>&1 &&
 		"$nft_bin" list chain inet fw4 pbr_prerouting 2>/dev/null |
-		grep -Fq 'comment "IKEv2 Site Link: YouTube"'
+		grep -Eq 'comment "IKEv2 Site Link: (YouTube|selected services)"'
+}
+
+policy_configuration_ready() {
+	[ -r "$domains_file" ] && [ -r "$addresses_file" ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link 2>/dev/null || true)" = policy ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link.name 2>/dev/null || true)" =
+		'IKEv2 Site Link: selected services' ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link.interface 2>/dev/null || true)" =
+		"$(getv interface sitehome)" ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link.src_addr 2>/dev/null || true)" =
+		"$(getv source_devices '@br-lan @ipsec-in')" ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link.dest_addr 2>/dev/null || true)" =
+		"file://$domains_file file://$addresses_file" ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link.enabled 2>/dev/null || true)" = 1 ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link_include 2>/dev/null || true)" = include ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link_include.path 2>/dev/null || true)" = "$pbr_helper" ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link_include.enabled 2>/dev/null || true)" = 1 ]
+}
+
+policy_reload_impl() {
+	# Exit routers never classify destinations. Disabled source routers retain
+	# the saved policy files but must not create a live PBR path.
+	[ "$(getv enabled 0)" = 1 ] && [ "$(role)" = source ] || return 0
+	validate_config
+	policy_configuration_ready || {
+		uci set pbr.ikev2_site_link=policy
+		uci set pbr.ikev2_site_link.name='IKEv2 Site Link: selected services'
+		uci set pbr.ikev2_site_link.interface="$(getv interface sitehome)"
+		uci set pbr.ikev2_site_link.src_addr="$(getv source_devices '@br-lan @ipsec-in')"
+		uci set pbr.ikev2_site_link.dest_addr="file://$domains_file file://$addresses_file"
+		uci set pbr.ikev2_site_link.proto='all'
+		uci set pbr.ikev2_site_link.enabled=1
+		uci reorder pbr.ikev2_site_link=1
+		uci set pbr.ikev2_site_link_include=include
+		uci set pbr.ikev2_site_link_include.path="$pbr_helper"
+		uci set pbr.ikev2_site_link_include.enabled=1
+		uci commit pbr
+	}
+	pbr_reload_checked || return 1
+	reconcile_source_routes || return 1
+	repair_source_aux || return 1
+	source_pbr_ready && policy_configuration_ready
+}
+
+policy_check() {
+	[ "$(getv enabled 0)" = 1 ] && [ "$(role)" = source ] || return 0
+	policy_configuration_ready && source_pbr_ready && source_routes_ready &&
+		source_aux_rules_ready
 }
 
 source_aux_rules_ready() {
@@ -1312,7 +1361,7 @@ disabled_runtime_ready() {
 		awk -v priority="$probe_rule_priority:" '$1 == priority { found=1 } END { exit !found }' || return 1
 	for chain in pbr_prerouting pbr_forward mangle_forward; do
 		! "$nft_bin" list chain inet fw4 "$chain" 2>/dev/null |
-			grep -Eq 'IKEv2 Site Link: (YouTube|direct exit WAN)|ikev2-site-link-(force-youtube-tcp|mss-clamp)' || return 1
+			grep -Eq 'IKEv2 Site Link: (YouTube|selected services|direct exit WAN)|ikev2-site-link-(force-youtube-tcp|mss-clamp)' || return 1
 	done
 }
 
@@ -1736,9 +1785,11 @@ case "${1:-}" in
 	disable) with_lock disable disable_impl ;;
 	connect) with_lock connect connect_impl ;;
 	secret-set) with_lock secret-set consume_secret_input "${2:-}" ;;
+	policy-reload) with_lock policy-reload policy_reload_impl ;;
+	policy-check) policy_check ;;
 	status) status_emit ;;
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;
 	render) if [ "$(role)" = exit ]; then render_exit; else render_source; fi ;;
-	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|status|check|sources|zones|monitor|render}' ;;
+	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|policy-reload|policy-check|status|check|sources|zones|monitor|render}' ;;
 esac

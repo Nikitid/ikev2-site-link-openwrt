@@ -644,7 +644,7 @@ cat >"$tmp/bin/nft-apply" <<'EOF'
 #!/bin/sh
 case "$*" in
 	'list chain inet fw4 pbr_prerouting')
-		echo 'meta mark set 0x10000 comment "IKEv2 Site Link: YouTube"'
+		echo 'meta mark set 0x10000 comment "IKEv2 Site Link: selected services"'
 		;;
 	'list chain inet fw4 pbr_forward')
 		[ -s "$SITE_LINK_TEST_AUX_STATE" ] &&

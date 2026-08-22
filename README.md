@@ -1,9 +1,9 @@
 # IKEv2 Site Link for OpenWrt
 
-Small LuCI application for routing a narrow destination set from one OpenWrt
-router through another over IKEv2. The first supported use case is sending
-YouTube traffic from an office router through a home router while the home
-router continues to apply its normal Zapret strategy.
+LuCI application for routing selected services and destinations from one
+OpenWrt router through another over IKEv2. The initial deployment sends YouTube
+traffic from an office router through a home router while the home router
+continues to apply its normal Zapret strategy.
 
 The project has two roles:
 
@@ -19,10 +19,12 @@ its road-warrior connection or address pool. This prevents pool overlap when
 both routers also provide inbound VPN service and keeps site-link counters and
 firewall boundaries independent.
 
-The source policy contains only YouTube-owned domains. It does not add Google
-or generic CDN suffixes. PBR sends resolved destinations into the site link;
-UDP/443 is rejected for that destination set so clients immediately retry over
-TCP through the exit router's Zapret strategy. If the CHILD_SA or virtual
+The source policy is built from selectable prepared services, administrator
+defined services, custom domain suffixes, and explicit IPv4 addresses or CIDR
+networks. The default selection contains only YouTube-owned domains and does
+not add Google or generic CDN suffixes. PBR sends resolved destinations into
+the site link; UDP/443 is rejected for that destination set so clients
+immediately retry over TCP through the exit router's Zapret strategy. If the CHILD_SA or virtual
 address is unavailable, the PBR table keeps an unreachable default and matching
 traffic cannot fall back to the source WAN.
 
@@ -89,8 +91,11 @@ socket.
 /usr/libexec/ikev2-site-link disable
 ```
 
-Configuration is stored in `/etc/config/ikev2-site-link`. The domain list is
-stored in `/etc/ikev2-site-link/youtube-domains.txt`.
+Link configuration is stored in `/etc/config/ikev2-site-link`. Policy state,
+manual destinations, selections, caches, and user-created service definitions
+are kept below `/etc/ikev2-site-link/`. The LuCI **Policy Routing** page updates
+them atomically and performs a checked PBR reload through the shared network
+action lock.
 `probe_interval` should have the same value on both routers: the source uses it
 as the active HTTPS probe cadence and the exit treats three times that interval
 without progress in either CHILD direction as stale.
