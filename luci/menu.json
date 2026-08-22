@@ -3,12 +3,20 @@
 		"title": "IKEv2 Site Link",
 		"order": 65,
 		"action": {
-			"type": "view",
-			"path": "ikev2-site-link/overview"
+			"type": "firstchild"
 		},
 		"depends": {
 			"acl": [ "luci-app-ikev2-site-link" ]
 		}
+	},
+	"admin/services/ikev2-site-link/overview": {
+		"title": "Overview",
+		"order": 10,
+		"action": { "type": "view", "path": "ikev2-site-link/overview" }
+	},
+	"admin/services/ikev2-site-link/policy": {
+		"title": "Policy Routing",
+		"order": 20,
+		"action": { "type": "view", "path": "ikev2-site-link/policy" }
 	}
 }
-

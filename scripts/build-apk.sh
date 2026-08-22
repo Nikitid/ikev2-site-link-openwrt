@@ -28,6 +28,8 @@ esac
 
 apk_tool="$sdk/staging_dir/host/bin/apk"
 [ -x "$apk_tool" ] || fail "SDK apk tool not found: $apk_tool"
+fakeroot_bin="$sdk/staging_dir/host/bin/fakeroot"
+[ -x "$fakeroot_bin" ] || fail "SDK fakeroot not found: $fakeroot_bin"
 
 for command in openssl python3 sha256sum; do
 	command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
@@ -59,7 +61,10 @@ mkdir -p "$output"
 rm -f "$output"/*.apk
 artifact="$output/$PKG_NAME-$PKG_VERSION.apk"
 
-"$apk_tool" mkpkg \
+# Package metadata must never depend on the uid that happens to run CI. The
+# SDK's fakeroot records every directory and file as root:root without needing
+# privileged filesystem writes in the workspace.
+STAGING_DIR_HOST="$sdk/staging_dir/host" "$fakeroot_bin" "$apk_tool" mkpkg \
 	--info "name:$PKG_NAME" \
 	--info "version:$PKG_VERSION" \
 	--info 'description:Monitored fail-closed IKEv2 site link for OpenWrt' \
@@ -78,6 +83,22 @@ artifact="$output/$PKG_NAME-$PKG_VERSION.apk"
 "$apk_tool" --keys-dir "$root/keys" verify "$artifact"
 "$apk_tool" --keys-dir "$root/keys" adbdump --format json \
 	"$artifact" >"$tmp/package.json"
+
+python3 - "$tmp/package.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as package_file:
+    package = json.load(package_file)
+
+for path in package.get("paths", []):
+    nodes = [(path.get("name", "/"), path.get("acl", {}))]
+    nodes.extend((entry.get("name", "?"), entry.get("acl", {}))
+                 for entry in path.get("files", []))
+    for name, acl in nodes:
+        if acl.get("user") != "root" or acl.get("group") != "root":
+            raise SystemExit(f"non-root package ownership: {name}: {acl}")
+PY
 
 # apk-tools 3 runs pre-deinstall on upgrade too, with "upgrade" as the first
 # argument; without that guard an upgrade tears down the live site link. A

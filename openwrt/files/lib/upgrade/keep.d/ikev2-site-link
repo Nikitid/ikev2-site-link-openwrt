@@ -1,3 +1,10 @@
 /etc/config/ikev2-site-link
 /etc/ikev2-site-link/youtube-domains.txt
+/etc/ikev2-site-link/domains.txt
+/etc/ikev2-site-link/domains.manual.txt
+/etc/ikev2-site-link/addresses.txt
+/etc/ikev2-site-link/addresses.manual.txt
+/etc/ikev2-site-link/services.selected.txt
+/etc/ikev2-site-link/services.d/
+/etc/ikev2-site-link/community-cache/
 /etc/ikev2-site-link/client.secret
