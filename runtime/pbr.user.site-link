@@ -7,36 +7,156 @@ site_link_table="pbr_$site_link_interface"
 site_link_force_tcp="$(uci -q get ikev2-site-link.main.force_tcp || echo 1)"
 site_link_set="pbr_${site_link_interface}_4_dst_ip_ikev2_site_link"
 site_link_comment='ikev2-site-link-force-youtube-tcp'
-site_link_nft='/usr/sbin/nft'
+site_link_mss_comment='ikev2-site-link-mss-clamp'
+site_link_nft="${SITE_LINK_NFT:-/usr/sbin/nft}"
+site_link_routes_only=0
+[ "${1:-}" = routes-only ] && site_link_routes_only=1
+site_link_dump_max_age="${SITE_LINK_SET_DUMP_MAX_AGE:-3600}"
+case "$site_link_dump_max_age" in '' | *[!0-9]*) site_link_dump_max_age=3600 ;; esac
 
 # PBR strict enforcement creates an unmetered unreachable default before it
 # sources custom includes. Remove every copy so the live route can win, then
 # install our own high-metric terminal route for fail-closed fallback.
-while ip -4 route del unreachable default table "$site_link_table" 2>/dev/null; do
-	:
-done
-ip -4 route replace unreachable default metric 32767 table "$site_link_table" 2>/dev/null ||
-	return 0
-
-if ip link show "$site_link_device" 2>/dev/null | grep -q 'UP' &&
+site_link_live=0
+if ip link show "$site_link_device" 2>/dev/null | grep -Eq '<[^>]*UP([,>])' &&
 	ip -4 -o addr show dev "$site_link_device" scope global 2>/dev/null | grep -q . &&
 	swanctl --list-sas --raw 2>/dev/null |
 	grep -Eq 'site-link4-[0-9]+ .*name=site-link4 .*state=INSTALLED'; then
-	ip -4 route replace default dev "$site_link_device" metric 10 table "$site_link_table"
-else
-	ip -4 route del default dev "$site_link_device" table "$site_link_table" 2>/dev/null || true
+	site_link_live=1
 fi
 
+if ! ip -4 route show table "$site_link_table" 2>/dev/null |
+	awk -v device="$site_link_device" -v live="$site_link_live" '
+		$1 == "unreachable" && $2 == "default" {
+			unreachable++
+			for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) terminal++
+		}
+		$1 == "default" { defaults++; if ($2 == "dev" && $3 == device && $0 ~ /metric 10([ ]|$)/) correct++ }
+		END {
+			if (live == 1) exit !(unreachable == 1 && terminal == 1 && defaults == 1 && correct == 1)
+			exit !(unreachable == 1 && terminal == 1 && defaults == 0)
+		}
+	'; then
+	# Install fail-closed first. It remains present while incorrect live defaults
+	# are removed, so a repair can never expose the source WAN as a fallback.
+	ip -4 route replace unreachable default metric 32767 table "$site_link_table" 2>/dev/null ||
+		return 1
+	ip -4 route show table "$site_link_table" 2>/dev/null |
+		awk '$1 == "unreachable" && $2 == "default" {
+			wanted=0
+			for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) wanted=1
+			if (!wanted) print
+		}' |
+		while IFS= read -r site_link_stale_route; do
+			[ -n "$site_link_stale_route" ] || continue
+			# The route is kernel-rendered, so splitting it back into iproute
+			# arguments is intentional.
+			# shellcheck disable=SC2086
+			ip -4 route del $site_link_stale_route table "$site_link_table" 2>/dev/null || exit 1
+		done || return 1
+	ip -4 route show table "$site_link_table" 2>/dev/null |
+		awk '$1 == "default"' |
+		while IFS= read -r site_link_stale_route; do
+			[ -n "$site_link_stale_route" ] || continue
+			# shellcheck disable=SC2086
+			ip -4 route del $site_link_stale_route table "$site_link_table" 2>/dev/null || exit 1
+		done || return 1
+	if [ "$site_link_live" = 1 ]; then
+		ip -4 route replace default dev "$site_link_device" metric 10 table "$site_link_table" ||
+			return 1
+	fi
+fi
+
+# The site link is IPv4-only. If PBR classifies an AAAA destination, keep it
+# fail-closed in the IPv6 policy table so it cannot fall through to the source
+# router's ordinary IPv6 WAN.
+if [ "$(uci -q get pbr.config.ipv6_enabled 2>/dev/null || echo 0)" = 1 ]; then
+	if ! ip -6 route show table "$site_link_table" 2>/dev/null |
+		awk '
+			$1 == "unreachable" && $2 == "default" {
+				unreachable++
+				for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) terminal++
+			}
+			$1 == "default" { defaults++ }
+			END { exit !(unreachable == 1 && terminal == 1 && defaults == 0) }
+		'; then
+		ip -6 route replace unreachable default metric 32767 table "$site_link_table" ||
+			return 1
+		ip -6 route show table "$site_link_table" 2>/dev/null |
+			awk '$1 == "unreachable" && $2 == "default" {
+				wanted=0
+				for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) wanted=1
+				if (!wanted) print
+			}' |
+			while IFS= read -r site_link_stale_route; do
+				[ -n "$site_link_stale_route" ] || continue
+				# shellcheck disable=SC2086
+				ip -6 route del $site_link_stale_route table "$site_link_table" 2>/dev/null || exit 1
+			done || return 1
+		ip -6 route show table "$site_link_table" 2>/dev/null |
+			awk '$1 == "default"' |
+			while IFS= read -r site_link_stale_route; do
+				[ -n "$site_link_stale_route" ] || continue
+				# shellcheck disable=SC2086
+				ip -6 route del $site_link_stale_route table "$site_link_table" 2>/dev/null || exit 1
+			done || return 1
+	fi
+fi
+
+[ "$site_link_routes_only" = 0 ] || return 0
+
+# A PBR/firewall reload recreates dnsmasq-backed sets empty. Restore a recent
+# snapshot so clients with warm DNS caches cannot bypass the policy until their
+# next lookup. Persistent snapshots expire quickly to avoid retaining stale CDN
+# addresses after a long shutdown.
+for site_link_family in 4 6; do
+	site_link_restore_set="pbr_${site_link_interface}_${site_link_family}_dst_ip_ikev2_site_link"
+	"$site_link_nft" list set inet fw4 "$site_link_restore_set" >/dev/null 2>&1 || continue
+	"$site_link_nft" list set inet fw4 "$site_link_restore_set" 2>/dev/null |
+		grep -q 'elements' && continue
+	if [ "$site_link_family" = 4 ]; then
+		site_link_dump="${SITE_LINK_SET_DUMP4:-/var/run/ikev2-site-link-set4.dump}"
+		site_link_persistent_dump="${SITE_LINK_PERSISTENT_SET_DUMP4:-/etc/ikev2-site-link/pbr-set4.dump}"
+	else
+		site_link_dump="${SITE_LINK_SET_DUMP6:-/var/run/ikev2-site-link-set6.dump}"
+		site_link_persistent_dump="${SITE_LINK_PERSISTENT_SET_DUMP6:-/etc/ikev2-site-link/pbr-set6.dump}"
+	fi
+	[ -s "$site_link_dump" ] || site_link_dump="$site_link_persistent_dump"
+	[ -s "$site_link_dump" ] || continue
+	# The persistent file is root-owned, but still treat it as input rather than
+	# executable nft syntax. Domain-backed sets contain individual addresses.
+	if [ "$site_link_family" = 4 ]; then
+		grep -Eq '^[0-9./-]+$' "$site_link_dump" || continue
+		grep -Ev '^[0-9./-]+$' "$site_link_dump" | grep -q . && continue
+	else
+		grep -Eq '^[0-9A-Fa-f:]+(/[0-9]+)?$' "$site_link_dump" || continue
+		grep -Ev '^[0-9A-Fa-f:]+(/[0-9]+)?$' "$site_link_dump" | grep -q . && continue
+	fi
+	site_link_saved="$(stat -c %Y "$site_link_dump" 2>/dev/null || echo 0)"
+	site_link_now="$(date +%s)"
+	case "$site_link_saved" in '' | *[!0-9]*) continue ;; esac
+	[ $((site_link_now - site_link_saved)) -ge 0 ] || continue
+	[ $((site_link_now - site_link_saved)) -le "$site_link_dump_max_age" ] || continue
+	site_link_elements="$(tr '\n' ',' <"$site_link_dump" | sed 's/,$//')"
+	[ -n "$site_link_elements" ] &&
+		"$site_link_nft" add element inet fw4 "$site_link_restore_set" \
+			"{ $site_link_elements }" 2>/dev/null || true
+done
+
 # pbr_prerouting is cleaned as well: releases before 0.2.4 installed the rule
-# there, and an upgrade must not leave the old copy behind.
-for site_link_chain in pbr_prerouting pbr_forward; do
-	"$site_link_nft" -a list chain inet fw4 "$site_link_chain" 2>/dev/null |
-		awk -v comment="$site_link_comment" 'index($0, comment) && /handle/ { print $NF }' |
-		while IFS= read -r site_link_handle; do
-			case "$site_link_handle" in '' | *[!0-9]*) continue ;; esac
-			"$site_link_nft" delete rule inet fw4 "$site_link_chain" handle "$site_link_handle" \
-				2>/dev/null || true
-		done
+# there, and an upgrade must not leave the old copy behind. mangle_forward
+# carries the MSS clamp below and is cleaned on the same pass, so a reload
+# never stacks a second copy on top of the one already installed.
+for site_link_chain in pbr_prerouting pbr_forward mangle_forward; do
+	for site_link_tag in "$site_link_comment" "$site_link_mss_comment"; do
+		"$site_link_nft" -a list chain inet fw4 "$site_link_chain" 2>/dev/null |
+			awk -v comment="$site_link_tag" 'index($0, comment) && /handle/ { print $NF }' |
+			while IFS= read -r site_link_handle; do
+				case "$site_link_handle" in '' | *[!0-9]*) continue ;; esac
+				"$site_link_nft" delete rule inet fw4 "$site_link_chain" handle "$site_link_handle" \
+					2>/dev/null || true
+			done
+	done
 done
 
 # QUIC must fail loudly, not silently. A dropped UDP/443 datagram makes the
@@ -54,6 +174,28 @@ if [ "$site_link_force_tcp" = 1 ] &&
 		ip daddr "@$site_link_set" udp dport 443 counter \
 		reject with icmp type port-unreachable \
 		comment "$site_link_comment" 2>/dev/null || true
+fi
+
+# The tunnel MTU is below the LAN MTU, so a client's SYN advertises an MSS the
+# tunnel cannot carry and the far end answers with segments that do not fit.
+# Recovering from that needs PMTUD, and the ICMP it depends on is widely
+# filtered: the visible result is a connection that establishes and then stalls
+# on the first large response.
+#
+# The zone's own mtu_fix does not close this. fw4 renders it as a single
+# ingress rule matching iifname, and for that direction "rt mtu" resolves the
+# route back towards the LAN, where the MTU is already 1500 — the clamp is a
+# no-op. The direction that matters is egress into the tunnel, which fw4 does
+# not emit, so the rule is installed here.
+#
+# mangle_forward is the same chain fw4 uses for its own MTU fixing, and it is
+# reached before pbr_forward returns early for already-marked packets.
+if ip link show "$site_link_device" 2>/dev/null | grep -Eq '<[^>]*UP([,>])'; then
+	"$site_link_nft" add rule inet fw4 mangle_forward \
+		oifname "$site_link_device" \
+		tcp flags '&' '(fin|syn|rst)' == syn \
+		tcp option maxseg size set rt mtu counter \
+		comment "$site_link_mss_comment" 2>/dev/null || true
 fi
 
 return 0

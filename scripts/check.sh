@@ -25,6 +25,23 @@ if grep -Eq 'udp dport 443 counter drop' "$root/runtime/pbr.user.site-link"; the
 	echo 'UDP/443 is dropped instead of rejected' >&2
 	exit 1
 fi
+
+# The zone's mtu_fix only clamps ingress, where "rt mtu" is the LAN MTU and the
+# clamp does nothing. The egress clamp into the tunnel has to be installed by
+# hand, and it has to survive a firewall reload like the QUIC rule does.
+grep -Fq 'tcp option maxseg size set rt mtu' "$root/runtime/pbr.user.site-link"
+grep -Fq 'mangle_forward' "$root/runtime/pbr.user.site-link"
+if grep -Eq '/etc/init\.d/pbr[[:space:]]+restart|pbr_init.*restart' \
+	"$root/runtime/ikev2-site-link.sh" "$root/runtime/pbr.user.site-link"; then
+	echo 'direct PBR restart found in runtime' >&2
+	exit 1
+fi
+grep -Fq '/var/run/ikev2-action.lock' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'routes-only' "$root/runtime/pbr.user.site-link"
+grep -Fq 'ip -6 route replace unreachable default metric 32767' \
+	"$root/runtime/pbr.user.site-link"
+grep -Fq 'SITE_LINK_SET_DUMP4' \
+	"$root/runtime/pbr.user.site-link"
 if grep -Eq '^(google\.com|googleapis\.com|googleusercontent\.com|cloudfront\.net|cloudflare\.com)$' \
 	"$root/openwrt/files/etc/ikev2-site-link/youtube-domains.txt"; then
 	echo 'generic domain found in the YouTube list' >&2
@@ -61,5 +78,6 @@ grep -Fq 'zones) zones_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
 
 "$root/scripts/test-runtime.sh"
+"$root/scripts/test-recovery.sh"
 
 printf 'checks OK\n'

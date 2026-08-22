@@ -14,6 +14,25 @@ exit_conn_file="${SITE_LINK_EXIT_CONN:-/etc/swanctl/conf.d/41-site-link-exit.con
 exit_cred_file="${SITE_LINK_EXIT_CRED:-/etc/swanctl/conf.d/93-site-link-exit-secret.conf}"
 pbr_helper="${SITE_LINK_PBR_HELPER:-/usr/share/pbr/pbr.user.site-link}"
 lock_dir="${SITE_LINK_LOCK:-/var/run/ikev2-site-link.lock}"
+monitor_lock_dir="${SITE_LINK_MONITOR_LOCK:-/var/run/ikev2-site-link-monitor.lock}"
+action_lock_dir="${IKEV2_ACTION_LOCK:-/var/run/ikev2-action.lock}"
+action_lock_status="${IKEV2_ACTION_LOCK_STATUS:-/var/run/ikev2-action.lock.status}"
+pbr_init="${SITE_LINK_PBR_INIT:-/etc/init.d/pbr}"
+site_init="${SITE_LINK_INIT:-/etc/init.d/ikev2-site-link}"
+network_init="${SITE_LINK_NETWORK_INIT:-/etc/init.d/network}"
+firewall_init="${SITE_LINK_FIREWALL_INIT:-/etc/init.d/firewall}"
+fw4_bin="${SITE_LINK_FW4:-fw4}"
+nft_bin="${SITE_LINK_NFT:-/usr/sbin/nft}"
+probe_state="${SITE_LINK_PROBE_STATE:-/var/run/ikev2-site-link-probe.status}"
+exit_traffic_state="${SITE_LINK_EXIT_TRAFFIC_STATE:-/var/run/ikev2-site-link-exit-traffic.status}"
+probe_url="${SITE_LINK_PROBE_URL:-https://www.youtube.com/generate_204}"
+probe_rule_priority="${SITE_LINK_PROBE_RULE_PRIORITY:-10444}"
+set_dump4="${SITE_LINK_SET_DUMP4:-/var/run/ikev2-site-link-set4.dump}"
+set_dump6="${SITE_LINK_SET_DUMP6:-/var/run/ikev2-site-link-set6.dump}"
+persistent_set_dump4="${SITE_LINK_PERSISTENT_SET_DUMP4:-/etc/ikev2-site-link/pbr-set4.dump}"
+persistent_set_dump6="${SITE_LINK_PERSISTENT_SET_DUMP6:-/etc/ikev2-site-link/pbr-set6.dump}"
+rollback_root="${SITE_LINK_ROLLBACK_ROOT:-/var/run}"
+secret_input_dir="${SITE_LINK_SECRET_INPUT_DIR:-/var/run}"
 
 uci() {
 	command uci -c "$uci_dir" "$@"
@@ -32,6 +51,22 @@ valid_name() {
 	case "$1" in '' | *[!A-Za-z0-9_.@-]*) return 1 ;; esac
 }
 
+valid_uci_name() {
+	case "$1" in '' | *[!A-Za-z0-9_]* | [0-9]*) return 1 ;; esac
+}
+
+valid_device() {
+	case "$1" in '' | *[!A-Za-z0-9_.-]*) return 1 ;; esac
+	[ "${#1}" -le 15 ]
+}
+
+valid_source_selectors() {
+	[ -n "$1" ] || return 1
+	for selector in $1; do
+		case "$selector" in @*) valid_device "${selector#@}" || return 1 ;; *) return 1 ;; esac
+	done
+}
+
 valid_uint() {
 	case "$1" in '' | *[!0-9]*) return 1 ;; esac
 }
@@ -44,25 +79,124 @@ valid_ipv4() {
 	'
 }
 
+valid_private_ipv4() {
+	valid_ipv4 "$1" || return 1
+	printf '%s\n' "$1" | awk -F. '
+		$1 == 10 { ok=1 }
+		$1 == 172 && $2 >= 16 && $2 <= 31 { ok=1 }
+		$1 == 192 && $2 == 168 { ok=1 }
+		END { exit !ok }
+	'
+}
+
 atomic_install() {
 	source="$1"
 	target="$2"
 	mode="$3"
-	chmod "$mode" "$source"
+	chmod "$mode" "$source" || return 1
 	mv -f "$source" "$target"
 }
 
-with_lock() {
+pid_lock_acquire() {
+	dir="$1"
+	if ! mkdir "$dir" 2>/dev/null; then
+		pid="$(cat "$dir/pid" 2>/dev/null || true)"
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+			return 1
+		fi
+		rm -f "$dir/pid"
+		rmdir "$dir" 2>/dev/null || return 1
+		mkdir "$dir" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" >"$dir/pid"
+}
+
+pid_lock_release() {
+	dir="$1"
+	[ "$(cat "$dir/pid" 2>/dev/null || true)" = "$$" ] || return 0
+	rm -f "$dir/pid"
+	rmdir "$dir" 2>/dev/null || true
+}
+
+action_lock_acquire() {
+	action="$1"
+	max_tries="${2:-${SITE_LINK_ACTION_LOCK_WAIT:-60}}"
+	case "$max_tries" in '' | *[!0-9]*) max_tries=60 ;; esac
 	tries=0
-	while ! mkdir "$lock_dir" 2>/dev/null; do
-		tries=$((tries + 1))
-		[ "$tries" -lt 20 ] || die 'another action is still running'
-		sleep 1
+	while ! mkdir "$action_lock_dir" 2>/dev/null; do
+		pid="$(sed -n 's/^pid=//p' "$action_lock_status" 2>/dev/null | tail -n1)"
+		updated="$(sed -n 's/^updated=//p' "$action_lock_status" 2>/dev/null | tail -n1)"
+		now="$(date +%s)"
+		case "$updated" in '' | *[!0-9]*) updated=0 ;; esac
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null &&
+		   [ $((now - updated)) -le 3600 ]; then
+			tries=$((tries + 1))
+			[ "$tries" -lt "$max_tries" ] || return 1
+			sleep 1
+			continue
+		fi
+		# mkdir() and publishing the owner file are separate. Do not steal a
+		# fresh, empty lock during that hand-off window.
+		if [ -z "$pid" ] && [ "$tries" -lt 3 ]; then
+			[ "$max_tries" -gt 1 ] || return 1
+			tries=$((tries + 1))
+			sleep 1
+			continue
+		fi
+		rm -f "$action_lock_status"
+		rmdir "$action_lock_dir" 2>/dev/null || true
 	done
-	trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+	{
+		printf 'owner=site-link\n'
+		printf 'action_id=%s\n' "$action"
+		printf 'pid=%s\n' "$$"
+		printf 'updated=%s\n' "$(date +%s)"
+	} >"$action_lock_status.new.$$"
+	mv "$action_lock_status.new.$$" "$action_lock_status"
+}
+
+action_lock_release() {
+	[ "$(sed -n 's/^pid=//p' "$action_lock_status" 2>/dev/null | tail -n1)" = "$$" ] ||
+		return 0
+	rm -f "$action_lock_status"
+	rmdir "$action_lock_dir" 2>/dev/null || true
+}
+
+locks_release() {
+	action_lock_release
+	pid_lock_release "$lock_dir"
+}
+
+with_lock() {
+	action="$1"
+	shift
+	pid_lock_acquire "$lock_dir" || die 'another site-link action is still running'
+	action_lock_acquire "$action" || {
+		pid_lock_release "$lock_dir"
+		die 'another network action is still running'
+	}
+	trap 'locks_release' EXIT
+	trap 'locks_release; exit 130' HUP INT TERM
 	"$@"
-	rmdir "$lock_dir" 2>/dev/null || true
-	trap - EXIT INT TERM
+	locks_release
+	trap - EXIT HUP INT TERM
+}
+
+try_with_lock() {
+	action="$1"
+	shift
+	pid_lock_acquire "$lock_dir" || return 1
+	action_lock_acquire "$action" 1 || {
+		pid_lock_release "$lock_dir"
+		return 1
+	}
+	# This helper runs inside monitor_loop. Do not replace its signal traps:
+	# clearing a nested trap here leaves the long-running monitor unable to
+	# perform a clean procd stop after its first repair attempt.
+	result=0
+	"$@" || result=$?
+	locks_release
+	return "$result"
 }
 
 role() {
@@ -82,8 +216,9 @@ validate_config() {
 	interval="$(getv monitor_interval 15)"
 	threshold="$(getv failure_threshold 3)"
 	cooldown="$(getv reconnect_cooldown 30)"
+	probe_interval="$(getv probe_interval 60)"
 	ike_port="$(getv ike_port 1500)"
-	for value in "$if_id" "$exit_if_id" "$mtu" "$dpd" "$interval" "$threshold" "$cooldown" "$ike_port"; do
+	for value in "$if_id" "$exit_if_id" "$mtu" "$dpd" "$interval" "$threshold" "$cooldown" "$probe_interval" "$ike_port"; do
 		valid_uint "$value" || die 'numeric setting contains a non-number'
 	done
 	[ "$if_id" -ge 1 ] && [ "$if_id" -le 4294967295 ] || die 'invalid XFRM if_id'
@@ -93,11 +228,29 @@ validate_config() {
 		42:* | 43:* | *:42 | *:43) die 'XFRM if_id 42 and 43 are reserved by IKEv2 Manager' ;;
 	esac
 	[ "$mtu" -ge 1200 ] && [ "$mtu" -le 1500 ] || die 'MTU must be 1200-1500'
+	[ "$dpd" -ge 5 ] && [ "$dpd" -le 300 ] || die 'DPD interval must be 5-300 seconds'
 	[ "$interval" -ge 5 ] && [ "$interval" -le 300 ] || die 'monitor interval must be 5-300 seconds'
 	[ "$threshold" -ge 1 ] && [ "$threshold" -le 20 ] || die 'failure threshold must be 1-20'
 	[ "$cooldown" -ge 15 ] && [ "$cooldown" -le 3600 ] || die 'reconnect cooldown must be 15-3600 seconds'
+	[ "$probe_interval" -ge 30 ] && [ "$probe_interval" -le 3600 ] || die 'probe interval must be 30-3600 seconds'
 	[ "$ike_port" -ge 1024 ] && [ "$ike_port" -le 65535 ] || die 'external IKE port must be 1024-65535'
 	[ "$ike_port" != 4500 ] || die 'external IKE port 4500 conflicts with standard IKE NAT-T'
+	interface="$(getv interface sitehome)"
+	exit_interface="$(getv exit_interface siteexit)"
+	device="$(getv xfrm_device ipsec-home)"
+	exit_device="$(getv exit_device ipsec-site-exit)"
+	inbound_zone="$(getv inbound_zone ikev2in)"
+	exit_wan="$(getv exit_wan wan)"
+	valid_uci_name "$interface" || die 'invalid source network name'
+	valid_uci_name "$exit_interface" || die 'invalid exit network name'
+	valid_device "$device" || die 'invalid source XFRM device name'
+	valid_device "$exit_device" || die 'invalid exit XFRM device name'
+	valid_uci_name "$inbound_zone" || die 'invalid inbound firewall zone name'
+	valid_uci_name "$exit_wan" || die 'invalid exit WAN zone name'
+	[ "$interface" != "$exit_interface" ] || die 'source and exit network names must differ'
+	[ "$device" != "$exit_device" ] || die 'source and exit XFRM device names must differ'
+	exit_pool="$(getv exit_pool 10.253.44.2)"
+	valid_private_ipv4 "$exit_pool" || die 'exit pool must be one RFC1918 IPv4 address'
 	if [ "$current_role" = source ]; then
 		endpoint="$(getv endpoint)"
 		remote_id="$(getv remote_id)"
@@ -105,11 +258,13 @@ validate_config() {
 		valid_name "$endpoint" || die 'invalid source endpoint'
 		[ -n "$remote_id" ] || die 'remote identity is required'
 		valid_name "$remote_id" || die 'invalid remote identity'
+		valid_source_selectors "$(getv source_devices '@br-lan @ipsec-in')" ||
+			die 'protected sources must be @device selectors'
 	else
 		remote_id="$(getv remote_id)"
-		[ -n "$remote_id" ] && valid_name "$remote_id" || die 'exit certificate identity is required'
-		exit_pool="$(getv exit_pool 10.253.44.2)"
-		valid_ipv4 "$exit_pool" || die 'exit pool must be one IPv4 address'
+		if [ -z "$remote_id" ] || ! valid_name "$remote_id"; then
+			die 'exit certificate identity is required'
+		fi
 	fi
 }
 
@@ -126,7 +281,7 @@ consume_secret_input() {
 	token="${1:-}"
 	case "$token" in '' | *[!A-Za-z0-9-]*) die 'invalid secret token' ;; esac
 	[ "${#token}" -ge 8 ] && [ "${#token}" -le 64 ] || die 'invalid secret token'
-	input="/var/run/ikev2-site-link-secret-$token.in"
+	input="$secret_input_dir/ikev2-site-link-secret-$token.in"
 	[ -f "$input" ] && [ ! -L "$input" ] || die 'secret input is missing'
 	chmod 600 "$input"
 	bytes="$(wc -c <"$input" | tr -d ' ')"
@@ -143,6 +298,7 @@ consume_secret_input() {
 	cp "$input" "$secret_file.new"
 	rm -f "$input"
 	atomic_install "$secret_file.new" "$secret_file" 600
+	[ "$(getv enabled 0)" = 1 ] || return 0
 	if [ "$(role)" = exit ]; then
 		render_exit
 		swanctl --load-creds --noprompt >/dev/null 2>&1
@@ -293,10 +449,50 @@ ensure_xfrm() {
 	device="${1:-$(getv xfrm_device ipsec-home)}"
 	if_id="${2:-$(getv if_id 44)}"
 	mtu="$(getv mtu 1360)"
-	modprobe xfrm_interface
-	ip link show "$device" >/dev/null 2>&1 ||
-		ip link add "$device" type xfrm if_id "$if_id"
+	modprobe xfrm_interface || return 1
+	if ip link show "$device" >/dev/null 2>&1; then
+		xfrm_device_matches "$device" "$if_id" ||
+			die "device $device exists but is not the configured XFRM interface"
+	else
+		ip link add "$device" type xfrm if_id "$if_id" || return 1
+	fi
 	ip link set "$device" mtu "$mtu" up
+}
+
+xfrm_device_matches() {
+	device="$1"
+	if_id="$2"
+	if_id_hex="$(printf '%x' "$if_id")"
+	ip -d link show "$device" 2>/dev/null |
+		grep -Eq "xfrm .*if_id (0x0*$if_id_hex|$if_id)( |$)"
+}
+
+xfrm_ready() {
+	device="$1"
+	if_id="$2"
+	mtu="$(getv mtu 1360)"
+	xfrm_device_matches "$device" "$if_id" || return 1
+	ip link show "$device" 2>/dev/null | grep -Eq '<[^>]*UP([,>])' || return 1
+	ip -o link show "$device" 2>/dev/null |
+		awk -v wanted="$mtu" '{ for (i = 1; i <= NF; i++) if ($i == "mtu") exit ($(i + 1) != wanted); exit 1 }'
+}
+
+delete_owned_xfrm() {
+	device="$1"
+	if_id="$2"
+	ip link show "$device" >/dev/null 2>&1 || return 0
+	xfrm_device_matches "$device" "$if_id" || {
+		printf 'ikev2-site-link: refusing to delete foreign device %s\n' "$device" >&2
+		return 1
+	}
+	ip link delete "$device"
+}
+
+delete_xfrm_candidate() {
+	device="$1"
+	if_id="$2"
+	valid_device "$device" && valid_uint "$if_id" || return 0
+	delete_owned_xfrm "$device" "$if_id"
 }
 
 firewall_zone_exists() {
@@ -307,6 +503,24 @@ firewall_zone_exists() {
 			return 0
 	done
 	return 1
+}
+
+pbr_reload_checked() {
+	"$pbr_init" reload >/dev/null || return 1
+	tries=0
+	while [ "$tries" -lt 20 ]; do
+		"$pbr_init" running >/dev/null 2>&1 && return 0
+		tries=$((tries + 1))
+		sleep 1
+	done
+	return 1
+}
+
+reload_routing_services() {
+	"$fw4_bin" check >/dev/null || return 1
+	"$network_init" reload >/dev/null || return 1
+	"$firewall_init" reload >/dev/null || return 1
+	pbr_reload_checked
 }
 
 source_uci_apply() {
@@ -353,14 +567,12 @@ source_uci_apply() {
 	uci set pbr.ikev2_site_link_include=include
 	uci set pbr.ikev2_site_link_include.path="$pbr_helper"
 	uci set pbr.ikev2_site_link_include.enabled=1
-	uci commit network
-	uci commit firewall
-	uci commit pbr
-	fw4 check >/dev/null
-	/etc/init.d/network reload >/dev/null
-	/etc/init.d/firewall reload >/dev/null
-	/etc/init.d/pbr restart >/dev/null
-	"$pbr_helper" >/dev/null 2>&1 || true
+	uci commit network || return 1
+	uci commit firewall || return 1
+	uci commit pbr || return 1
+	reload_routing_services || return 1
+	ensure_probe_rule || return 1
+	repair_source_aux
 }
 
 exit_uci_apply() {
@@ -402,97 +614,242 @@ exit_uci_apply() {
 	uci set pbr.ikev2_site_link.enabled=1
 	uci reorder pbr.ikev2_site_link=1
 	uci -q delete pbr.ikev2_site_link_include || true
-	uci commit network
-	uci commit firewall
-	uci commit pbr
-	fw4 check >/dev/null
-	/etc/init.d/network reload >/dev/null
-	/etc/init.d/firewall reload >/dev/null
-	/etc/init.d/pbr restart >/dev/null
+	uci commit network || return 1
+	uci commit firewall || return 1
+	uci commit pbr || return 1
+	reload_routing_services
 	ip -4 route replace "$exit_pool/32" dev "$device"
 }
 
-source_uci_remove() {
-	interface="$(getv interface sitehome)"
-	uci -q delete "network.$interface" || true
-	uci -q delete firewall.ikev2_site_link || true
-	uci -q delete firewall.ikev2_site_link_forward || true
-	uci -q delete firewall.ikev2_site_link_inbound || true
+all_uci_remove() {
+	source_interface="$(getv interface sitehome)"
+	exit_interface="$(getv exit_interface siteexit)"
+	applied_source_interface="$(applied_get interface "$source_interface")"
+	applied_exit_interface="$(applied_get exit_interface "$exit_interface")"
+	for managed_interface in "$source_interface" "$exit_interface" \
+		"$applied_source_interface" "$applied_exit_interface"; do
+		valid_uci_name "$managed_interface" || continue
+		uci -q delete "network.$managed_interface" || true
+	done
+	for section in ikev2_site_link ikev2_site_link_forward ikev2_site_link_inbound \
+		ikev2_site_link_exit ikev2_site_link_exit_wan ikev2_site_link_ike; do
+		uci -q delete "firewall.$section" || true
+	done
 	uci -q delete pbr.ikev2_site_link || true
 	uci -q delete pbr.ikev2_site_link_include || true
-	uci -q del_list "pbr.config.supported_interface=$interface" || true
-	uci commit network
-	uci commit firewall
-	uci commit pbr
-	/etc/init.d/network reload >/dev/null
-	/etc/init.d/firewall reload >/dev/null
-	/etc/init.d/pbr restart >/dev/null
+	uci -q del_list "pbr.config.supported_interface=$source_interface" || true
+	uci -q del_list "pbr.config.supported_interface=$applied_source_interface" || true
+	uci commit network || return 1
+	uci commit firewall || return 1
+	uci commit pbr || return 1
+	reload_routing_services
 }
 
-exit_uci_remove() {
-	interface="$(getv exit_interface siteexit)"
-	uci -q delete "network.$interface" || true
-	uci -q delete firewall.ikev2_site_link_exit || true
-	uci -q delete firewall.ikev2_site_link_exit_wan || true
-	uci -q delete firewall.ikev2_site_link_ike || true
-	uci -q delete pbr.ikev2_site_link || true
-	uci commit network
-	uci commit firewall
-	uci commit pbr
-	/etc/init.d/network reload >/dev/null
-	/etc/init.d/firewall reload >/dev/null
-	/etc/init.d/pbr restart >/dev/null
+inactive_role_present() {
+	if [ "$(role)" = source ]; then
+		uci -q get "network.$(getv exit_interface siteexit)" >/dev/null 2>&1 ||
+			grep -Fq 'site-link-in {' "$exit_conn_file" 2>/dev/null
+	else
+		uci -q get "network.$(getv interface sitehome)" >/dev/null 2>&1 ||
+			grep -Fq 'site-link {' "$conn_file" 2>/dev/null
+	fi
+}
+
+applied_get() {
+	uci -q get "$config_name.applied.$1" 2>/dev/null || printf '%s\n' "${2:-}"
+}
+
+applied_resources_match() {
+	if [ "$(uci -q get "$config_name.applied" 2>/dev/null || true)" = state ]; then
+		[ "$(applied_get role)" = "$(role)" ] &&
+		[ "$(applied_get interface)" = "$(getv interface sitehome)" ] &&
+		[ "$(applied_get xfrm_device)" = "$(getv xfrm_device ipsec-home)" ] &&
+		[ "$(applied_get if_id)" = "$(getv if_id 44)" ] &&
+		[ "$(applied_get exit_interface)" = "$(getv exit_interface siteexit)" ] &&
+		[ "$(applied_get exit_device)" = "$(getv exit_device ipsec-site-exit)" ] &&
+		[ "$(applied_get exit_if_id)" = "$(getv exit_if_id 45)" ] &&
+		[ "$(applied_get exit_pool)" = "$(getv exit_pool 10.253.44.2)" ]
+		return
+	fi
+	# Migration from releases without applied-state: the generated firewall
+	# section and swanctl profile still reveal the active source resources.
+	if uci -q get firewall.ikev2_site_link >/dev/null 2>&1; then
+		old_interface="$(uci -q get firewall.ikev2_site_link.name 2>/dev/null || true)"
+		old_device="$(uci -q get "network.$old_interface.device" 2>/dev/null || true)"
+		old_if_id="$(sed -n 's/^[[:space:]]*if_id_in = //p' "$conn_file" 2>/dev/null | head -n1)"
+		[ "$(role)" = source ] &&
+		[ "$old_interface" = "$(getv interface sitehome)" ] &&
+		[ "$old_device" = "$(getv xfrm_device ipsec-home)" ] &&
+		[ "$old_if_id" = "$(getv if_id 44)" ]
+		return
+	fi
+	if uci -q get firewall.ikev2_site_link_exit >/dev/null 2>&1; then
+		old_interface="$(uci -q get firewall.ikev2_site_link_exit.name 2>/dev/null || true)"
+		old_device="$(uci -q get "network.$old_interface.device" 2>/dev/null || true)"
+		old_if_id="$(sed -n 's/^[[:space:]]*if_id_in = //p' "$exit_conn_file" 2>/dev/null | head -n1)"
+		[ "$(role)" = exit ] &&
+		[ "$old_interface" = "$(getv exit_interface siteexit)" ] &&
+		[ "$old_device" = "$(getv exit_device ipsec-site-exit)" ] &&
+		[ "$old_if_id" = "$(getv exit_if_id 45)" ]
+		return
+	fi
+	return 0
+}
+
+record_applied_resources() {
+	uci set "$config_name.applied=state"
+	uci set "$config_name.applied.role=$(role)"
+	uci set "$config_name.applied.interface=$(getv interface sitehome)"
+	uci set "$config_name.applied.xfrm_device=$(getv xfrm_device ipsec-home)"
+	uci set "$config_name.applied.if_id=$(getv if_id 44)"
+	uci set "$config_name.applied.exit_interface=$(getv exit_interface siteexit)"
+	uci set "$config_name.applied.exit_device=$(getv exit_device ipsec-site-exit)"
+	uci set "$config_name.applied.exit_if_id=$(getv exit_if_id 45)"
+	uci set "$config_name.applied.exit_pool=$(getv exit_pool 10.253.44.2)"
+	uci commit "$config_name"
 }
 
 rollback_cleanup() {
 	directory="$1"
-	for file in network firewall pbr; do
+	for file in network firewall pbr conn cred conn.missing cred.missing; do
 		rm -f "$directory/$file"
 	done
 	rmdir "$directory" 2>/dev/null || true
 }
 
+rollback_file_backup() {
+	source="$1"
+	target="$2"
+	if [ -f "$source" ] && [ ! -L "$source" ]; then
+		cp "$source" "$target"
+	else
+		: >"$target.missing"
+	fi
+}
+
+rollback_file_restore() {
+	backup="$1"
+	target="$2"
+	if [ -f "$backup.missing" ]; then
+		rm -f "$target"
+	else
+		cp "$backup" "$target.new"
+		atomic_install "$target.new" "$target" 600
+	fi
+}
+
+reset_source_sa() {
+	source_sa_ready || return 0
+	swanctl --terminate --ike site-link --timeout 5 >/dev/null 2>&1
+}
+
+reset_exit_sa() {
+	exit_sa_ready || return 0
+	swanctl --terminate --ike site-link-in --timeout 5 >/dev/null 2>&1
+}
+
 source_apply_transaction() {
-	rollback_dir="/var/run/ikev2-site-link-rollback-$$"
-	mkdir "$rollback_dir"
+	rollback_dir="$rollback_root/ikev2-site-link-rollback-$$"
+	mkdir "$rollback_dir" || die 'unable to create routing rollback snapshot'
 	for file in network firewall pbr; do
-		cp "/etc/config/$file" "$rollback_dir/$file"
+		cp "$uci_dir/$file" "$rollback_dir/$file" || {
+			rollback_cleanup "$rollback_dir"
+			die 'unable to create routing rollback snapshot'
+		}
 	done
-	if (set -e; source_uci_apply; connect_source; data_plane_ready); then
+	rollback_file_backup "$conn_file" "$rollback_dir/conn" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up source profile'
+	}
+	rollback_file_backup "$cred_file" "$rollback_dir/cred" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up source credential'
+	}
+	had_previous=0
+	grep -Fq 'site-link {' "$rollback_dir/conn" 2>/dev/null && had_previous=1
+	# Do not validate a changed endpoint, identity or credential through an SA
+	# established from the previous profile.
+	if (set -e; render_source; ensure_xfrm; source_uci_apply; reset_source_sa; connect_source;
+		source_control_ready; data_plane_ready); then
 		rollback_cleanup "$rollback_dir"
 		return 0
 	fi
-	for file in network firewall pbr; do
-		cp "$rollback_dir/$file" "/etc/config/$file"
-	done
-	rollback_cleanup "$rollback_dir"
-	/etc/init.d/network reload >/dev/null 2>&1 || true
-	/etc/init.d/firewall reload >/dev/null 2>&1 || true
-	/etc/init.d/pbr restart >/dev/null 2>&1 || true
 	swanctl --terminate --ike site-link --timeout 5 >/dev/null 2>&1 || true
+	rollback_ok=1
+	for file in network firewall pbr; do
+		cp "$rollback_dir/$file" "$uci_dir/$file" || rollback_ok=0
+	done
+	rollback_file_restore "$rollback_dir/conn" "$conn_file" || rollback_ok=0
+	rollback_file_restore "$rollback_dir/cred" "$cred_file" || rollback_ok=0
+	"$network_init" reload >/dev/null 2>&1 || rollback_ok=0
+	"$firewall_init" reload >/dev/null 2>&1 || rollback_ok=0
+	pbr_reload_checked >/dev/null 2>&1 || rollback_ok=0
+	swanctl --load-conns >/dev/null 2>&1 || rollback_ok=0
+	swanctl --load-creds --noprompt >/dev/null 2>&1 || rollback_ok=0
 	device="$(getv xfrm_device ipsec-home)"
-	ip -4 addr flush dev "$device" scope global 2>/dev/null || true
+	if [ "$had_previous" = 1 ]; then
+		connect_source >/dev/null 2>&1 || true
+	else
+		delete_probe_rule "$device" "$(getv interface sitehome)" >/dev/null 2>&1 || true
+		ip -4 addr flush dev "$device" scope global 2>/dev/null || true
+		delete_xfrm_candidate "$device" "$(getv if_id 44)" >/dev/null 2>&1 || true
+	fi
+	rollback_cleanup "$rollback_dir"
+	if [ "$rollback_ok" != 1 ]; then
+		"$site_init" stop >/dev/null 2>&1 || true
+		die 'tunnel validation failed and rollback is incomplete; monitor stopped'
+	fi
 	die 'tunnel validation failed; previous routing configuration restored'
 }
 
 exit_apply_transaction() {
-	rollback_dir="/var/run/ikev2-site-link-rollback-$$"
-	mkdir "$rollback_dir"
+	rollback_dir="$rollback_root/ikev2-site-link-rollback-$$"
+	mkdir "$rollback_dir" || die 'unable to create routing rollback snapshot'
 	for file in network firewall pbr; do
-		cp "/etc/config/$file" "$rollback_dir/$file"
+		cp "$uci_dir/$file" "$rollback_dir/$file" || {
+			rollback_cleanup "$rollback_dir"
+			die 'unable to create routing rollback snapshot'
+		}
 	done
-	if (set -e; exit_uci_apply; swanctl --load-conns >/dev/null 2>&1;
-		swanctl --load-pools >/dev/null 2>&1; swanctl --load-creds >/dev/null 2>&1); then
+	rollback_file_backup "$exit_conn_file" "$rollback_dir/conn" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up exit profile'
+	}
+	rollback_file_backup "$exit_cred_file" "$rollback_dir/cred" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up exit credential'
+	}
+	had_previous=0
+	grep -Fq 'site-link-in {' "$rollback_dir/conn" 2>/dev/null && had_previous=1
+	if (set -e; render_exit; ensure_xfrm "$(getv exit_device ipsec-site-exit)" "$(getv exit_if_id 45)";
+		exit_uci_apply; reset_exit_sa; swanctl --load-conns >/dev/null 2>&1;
+		swanctl --load-pools >/dev/null 2>&1; swanctl --load-creds >/dev/null 2>&1;
+		exit_control_ready); then
 		rollback_cleanup "$rollback_dir"
 		return 0
 	fi
+	swanctl --terminate --ike site-link-in --timeout 5 >/dev/null 2>&1 || true
+	rollback_ok=1
 	for file in network firewall pbr; do
-		cp "$rollback_dir/$file" "/etc/config/$file"
+		cp "$rollback_dir/$file" "$uci_dir/$file" || rollback_ok=0
 	done
+	rollback_file_restore "$rollback_dir/conn" "$exit_conn_file" || rollback_ok=0
+	rollback_file_restore "$rollback_dir/cred" "$exit_cred_file" || rollback_ok=0
+	"$network_init" reload >/dev/null 2>&1 || rollback_ok=0
+	"$firewall_init" reload >/dev/null 2>&1 || rollback_ok=0
+	pbr_reload_checked >/dev/null 2>&1 || rollback_ok=0
+	swanctl --load-conns >/dev/null 2>&1 || rollback_ok=0
+	swanctl --load-pools >/dev/null 2>&1 || rollback_ok=0
+	swanctl --load-creds --noprompt >/dev/null 2>&1 || rollback_ok=0
+	if [ "$had_previous" != 1 ]; then
+		delete_xfrm_candidate "$(getv exit_device ipsec-site-exit)" \
+			"$(getv exit_if_id 45)" >/dev/null 2>&1 || true
+	fi
 	rollback_cleanup "$rollback_dir"
-	/etc/init.d/network reload >/dev/null 2>&1 || true
-	/etc/init.d/firewall reload >/dev/null 2>&1 || true
-	/etc/init.d/pbr restart >/dev/null 2>&1 || true
+	if [ "$rollback_ok" != 1 ]; then
+		"$site_init" stop >/dev/null 2>&1 || true
+		die 'exit validation failed and rollback is incomplete; monitor stopped'
+	fi
 	die 'exit configuration validation failed; previous routing configuration restored'
 }
 
@@ -501,15 +858,15 @@ sync_vip() {
 	vip="$(swanctl --list-sas --raw 2>/dev/null |
 		sed -n 's/.*site-link {.*local-vips=\[\([^]]*\)\].*/\1/p' |
 		tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
-		grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+		awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !found { value=$0; found=1 } END { if (found) print value }')"
 	[ -n "$vip" ] || return 1
 	current="$(ip -4 -o addr show dev "$device" scope global 2>/dev/null |
 		awk 'NR == 1 { sub(/\/.*/, "", $4); print $4 }')"
 	if [ "$current" != "$vip" ]; then
-		ip -4 addr flush dev "$device" scope global
-		ip -4 addr add "$vip/32" dev "$device"
+		ip -4 addr flush dev "$device" scope global || return 1
+		ip -4 addr add "$vip/32" dev "$device" || return 1
 	fi
-	"$pbr_helper" >/dev/null 2>&1 || true
+	reconcile_source_routes
 }
 
 source_sa_ready() {
@@ -517,14 +874,76 @@ source_sa_ready() {
 		grep -Eq 'site-link4-[0-9]+ .*name=site-link4 .*state=INSTALLED'
 }
 
+source_sa_id() {
+	swanctl --list-sas --raw 2>/dev/null |
+		tr '{}' '\n' |
+		awk '
+			$0 ~ /^[[:space:]]*site-link[[:space:]]*$/ { wanted=1; next }
+			wanted {
+				value=$0
+				sub(/.*uniqueid=/, "", value)
+				sub(/[^0-9].*/, "", value)
+				if (value != "" && result == "") result=value
+				wanted=0
+			}
+			END { if (result != "") print result }
+		'
+}
+
+source_conn_loaded() {
+	swanctl --list-conns --raw 2>/dev/null |
+		grep -Eq 'site-link .*site-link4'
+}
+
 source_pbr_ready() {
-	/usr/sbin/nft list chain inet fw4 pbr_prerouting 2>/dev/null |
+	"$pbr_init" running >/dev/null 2>&1 &&
+		"$nft_bin" list chain inet fw4 pbr_prerouting 2>/dev/null |
 		grep -Fq 'comment "IKEv2 Site Link: YouTube"'
 }
 
+source_aux_rules_ready() {
+	mss_count="$("$nft_bin" list chain inet fw4 mangle_forward 2>/dev/null |
+		grep -c 'comment "ikev2-site-link-mss-clamp"' || true)"
+	[ "$mss_count" = 1 ] || return 1
+	[ "$(getv force_tcp 1)" != 1 ] && return 0
+	quic_count="$("$nft_bin" list chain inet fw4 pbr_forward 2>/dev/null |
+		grep -c 'comment "ikev2-site-link-force-youtube-tcp"' || true)"
+	[ "$quic_count" = 1 ]
+}
+
+repair_source_aux() {
+	"$pbr_helper" >/dev/null 2>&1 || return 1
+	source_aux_rules_ready
+}
+
+source_ipv4_terminal_ready() {
+	table="pbr_$(getv interface sitehome)"
+	ip -4 route show table "$table" 2>/dev/null |
+		awk '
+			$1 == "unreachable" && $2 == "default" {
+				unreachable++
+				for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) terminal++
+			}
+			END { exit !(unreachable == 1 && terminal == 1) }
+		'
+}
+
+source_ipv6_terminal_ready() {
+	table="pbr_$(getv interface sitehome)"
+	[ "$(uci -q get pbr.config.ipv6_enabled 2>/dev/null || echo 0)" != 1 ] ||
+		ip -6 route show table "$table" 2>/dev/null |
+		awk '
+			$1 == "unreachable" && $2 == "default" {
+				unreachable++
+				for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) terminal++
+			}
+			$1 == "default" { defaults++ }
+			END { exit !(unreachable == 1 && terminal == 1 && defaults == 0) }
+		'
+}
+
 source_fail_closed_ready() {
-	ip -4 route show table "pbr_$(getv interface sitehome)" 2>/dev/null |
-		grep -Eq '^unreachable default metric 32767( |$)'
+	source_ipv4_terminal_ready && source_ipv6_terminal_ready && ! source_live_route_ready
 }
 
 source_live_route_ready() {
@@ -533,9 +952,79 @@ source_live_route_ready() {
 		grep -Eq "^default dev $device( |$).*metric 10( |$)"
 }
 
+source_routes_ready() {
+	device="$(getv xfrm_device ipsec-home)"
+	table="pbr_$(getv interface sitehome)"
+	ip -4 route show table "$table" 2>/dev/null |
+		awk -v device="$device" '
+			$1 == "unreachable" && $2 == "default" {
+				unreachable++
+				for (i = 1; i <= NF; i++) if ($i == "metric" && $(i + 1) == 32767) terminal++
+			}
+			$1 == "default" { defaults++; if ($2 == "dev" && $3 == device && $0 ~ /metric 10([ ]|$)/) live++ }
+			END { exit !(unreachable == 1 && terminal == 1 && defaults == 1 && live == 1) }
+		' && source_ipv6_terminal_ready
+}
+
+probe_rule_ready() {
+	device="$(getv xfrm_device ipsec-home)"
+	table="pbr_$(getv interface sitehome)"
+	ip -4 rule show 2>/dev/null |
+		awk -v priority="$probe_rule_priority:" -v device="$device" -v table="$table" '
+			$1 == priority {
+				total++
+				for (i = 1; i <= NF; i++) {
+					if ($i == "oif" && $(i + 1) == device) oif=1
+					if (($i == "lookup" || $i == "table") && $(i + 1) == table) lookup=1
+				}
+				if (oif && lookup) correct++
+			}
+			END { exit !(total == 1 && correct == 1) }
+		'
+}
+
+ensure_probe_rule() {
+	probe_rule_ready && return 0
+	if ip -4 rule show 2>/dev/null | awk -v priority="$probe_rule_priority:" '$1 == priority { found=1 } END { exit !found }'; then
+		return 1
+	fi
+	device="$(getv xfrm_device ipsec-home)"
+	table="pbr_$(getv interface sitehome)"
+	ip -4 rule add priority "$probe_rule_priority" oif "$device" lookup "$table" || return 1
+	probe_rule_ready
+}
+
+delete_probe_rule() {
+	device="$1"
+	interface="$2"
+	valid_device "$device" && valid_uci_name "$interface" || return 0
+	while ip -4 rule show 2>/dev/null |
+		awk -v priority="$probe_rule_priority:" -v device="$device" -v table="pbr_$interface" '
+			$1 == priority {
+				for (i = 1; i <= NF; i++) {
+					if ($i == "oif" && $(i + 1) == device) oif=1
+					if (($i == "lookup" || $i == "table") && $(i + 1) == table) lookup=1
+				}
+			}
+			END { exit !(oif && lookup) }
+		'; do
+		ip -4 rule del priority "$probe_rule_priority" oif "$device" lookup "pbr_$interface" || return 1
+	done
+}
+
+reconcile_source_routes() {
+	"$pbr_helper" routes-only >/dev/null 2>&1 || return 1
+	if source_sa_ready; then
+		source_routes_ready
+	else
+		source_fail_closed_ready && ! source_live_route_ready
+	fi
+}
+
 repair_source_pbr() {
-	/etc/init.d/pbr restart >/dev/null 2>&1 || return 1
-	"$pbr_helper" >/dev/null 2>&1 || true
+	pbr_reload_checked || return 1
+	ensure_probe_rule || return 1
+	repair_source_aux || return 1
 	source_pbr_ready
 }
 
@@ -544,19 +1033,341 @@ exit_sa_ready() {
 		grep -Eq 'site-link-net-[0-9]+ .*state=INSTALLED'
 }
 
+exit_conn_loaded() {
+	swanctl --list-conns --raw 2>/dev/null |
+		grep -Eq 'site-link-in .*site-link-net'
+}
+
+child_counters() {
+	child="$1"
+	swanctl --list-sas --raw 2>/dev/null |
+		tr '{}' '\n' |
+		awk -v child="$child" '
+			{
+				header=$0
+				gsub(/^[[:space:]]+|[[:space:]]+$/, "", header)
+				if (header ~ ("^" child "-[0-9]+$")) {
+					id=header
+					sub("^" child "-", "", id)
+					wanted=1
+					next
+				}
+			}
+			wanted {
+				wanted=0
+				if (index($0, "name=" child) == 0 || index($0, "state=INSTALLED") == 0) next
+				for (i=1; i<=NF; i++) {
+					if ($i ~ /^bytes-in=[0-9]+$/) { in_bytes=$i; sub(/^bytes-in=/, "", in_bytes) }
+					if ($i ~ /^bytes-out=[0-9]+$/) { out_bytes=$i; sub(/^bytes-out=/, "", out_bytes) }
+				}
+				if (!found && id != "" && in_bytes != "" && out_bytes != "") {
+					print id, in_bytes, out_bytes
+					found=1
+				}
+			}
+			END { exit !found }
+		'
+}
+
+exit_traffic_update() {
+	metrics="$(child_counters site-link-net)" || return 1
+	set -- $metrics
+	[ "$#" = 3 ] || return 1
+	current_id="$1"
+	current_in="$2"
+	current_out="$3"
+	previous_id="$(sed -n 's/^sa_id=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	previous_in="$(sed -n 's/^bytes_in=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	previous_out="$(sed -n 's/^bytes_out=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	last_in="$(sed -n 's/^last_in=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	last_out="$(sed -n 's/^last_out=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	for value in "$current_id" "$current_in" "$current_out"; do
+		valid_uint "$value" || return 1
+	done
+	case "$previous_in" in '' | *[!0-9]*) previous_in=0 ;; esac
+	case "$previous_out" in '' | *[!0-9]*) previous_out=0 ;; esac
+	case "$last_in" in '' | *[!0-9]*) last_in=0 ;; esac
+	case "$last_out" in '' | *[!0-9]*) last_out=0 ;; esac
+	now="$(date +%s)"
+	if [ "$previous_id" != "$current_id" ]; then
+		last_in=0
+		last_out=0
+		[ "$current_in" -gt 0 ] && last_in="$now"
+		[ "$current_out" -gt 0 ] && last_out="$now"
+	else
+		[ "$current_in" = "$previous_in" ] || last_in="$now"
+		[ "$current_out" = "$previous_out" ] || last_out="$now"
+	fi
+	{
+		printf 'sa_id=%s\n' "$current_id"
+		printf 'bytes_in=%s\n' "$current_in"
+		printf 'bytes_out=%s\n' "$current_out"
+		printf 'last_in=%s\n' "$last_in"
+		printf 'last_out=%s\n' "$last_out"
+	} >"$exit_traffic_state.new"
+	chmod 600 "$exit_traffic_state.new"
+	mv "$exit_traffic_state.new" "$exit_traffic_state"
+}
+
+exit_traffic_recent() {
+	metrics="$(child_counters site-link-net)" || return 1
+	set -- $metrics
+	[ "$#" = 3 ] || return 1
+	state_id="$(sed -n 's/^sa_id=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	last_in="$(sed -n 's/^last_in=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	last_out="$(sed -n 's/^last_out=//p' "$exit_traffic_state" 2>/dev/null | tail -n1)"
+	[ "$state_id" = "$1" ] && valid_uint "$last_in" && valid_uint "$last_out" || return 1
+	[ "$last_in" -gt 0 ] && [ "$last_out" -gt 0 ] || return 1
+	now="$(date +%s)"
+	interval="$(getv probe_interval 60)"
+	valid_uint "$interval" || return 1
+	[ "$interval" -ge 30 ] && [ "$interval" -le 3600 ] || return 1
+	timeout=$((interval * 3))
+	[ "$now" -ge "$last_in" ] && [ "$now" -ge "$last_out" ] &&
+		[ $((now - last_in)) -le "$timeout" ] && [ $((now - last_out)) -le "$timeout" ]
+}
+
+exit_route_ready() {
+	device="$(getv exit_device ipsec-site-exit)"
+	pool="$(getv exit_pool 10.253.44.2)"
+	ip -4 route show "$pool/32" 2>/dev/null |
+		awk -v pool="$pool" -v cidr="$pool/32" -v device="$device" '
+			$1 == pool || $1 == cidr {
+				total++
+				if ($2 == "dev" && $3 == device) correct++
+			}
+			END { exit !(total == 1 && correct == 1) }
+		'
+}
+
+exit_pool_route_available() {
+	pool="$(getv exit_pool 10.253.44.2)"
+	source_device="$(getv xfrm_device ipsec-home)"
+	exit_device="$(getv exit_device ipsec-site-exit)"
+	matched="$(ip -4 route show match "$pool" 2>/dev/null | sed -n '1p')"
+	case "$matched" in
+		'' | default*) return 0 ;;
+		"$pool dev $source_device"* | "$pool/32 dev $source_device"* | \
+			"$pool dev $exit_device"* | "$pool/32 dev $exit_device"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+ensure_exit_route() {
+	exit_route_ready && return 0
+	device="$(getv exit_device ipsec-site-exit)"
+	pool="$(getv exit_pool 10.253.44.2)/32"
+	ip -4 route replace "$pool" dev "$device"
+	exit_route_ready
+}
+
+exit_pbr_ready() {
+	"$pbr_init" running >/dev/null 2>&1 &&
+		"$nft_bin" list chain inet fw4 pbr_prerouting 2>/dev/null |
+		grep -Fq 'comment "IKEv2 Site Link: direct exit WAN"'
+}
+
 data_plane_ready() {
 	device="$(getv xfrm_device ipsec-home)"
-	command -v curl >/dev/null 2>&1 || return 0
+	command -v curl >/dev/null 2>&1 || return 1
 	curl -4fsS --interface "$device" --connect-timeout 3 --max-time 6 \
-		-o /dev/null https://www.youtube.com/generate_204
+		-o /dev/null "$probe_url"
+}
+
+probe_due() {
+	now="$1"
+	last="$(sed -n 's/^last=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	case "$last" in '' | *[!0-9]*) last=0 ;; esac
+	[ "$now" -lt "$last" ] || [ $((now - last)) -ge "$(getv probe_interval 60)" ]
+}
+
+time_due() {
+	now="$1"
+	last="$2"
+	interval="$3"
+	[ "$now" -lt "$last" ] || [ $((now - last)) -ge "$interval" ]
+}
+
+probe_save() {
+	result="$1"
+	previous="$(sed -n 's/^failures=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	previous_sa_id="$(sed -n 's/^sa_id=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	current_sa_id="$(source_sa_id)"
+	case "$previous" in '' | *[!0-9]*) previous=0 ;; esac
+	[ "$previous_sa_id" = "$current_sa_id" ] || previous=0
+	if [ "$result" = 1 ]; then
+		probe_failures_value=0
+	else
+		probe_failures_value=$((previous + 1))
+	fi
+	{
+		printf 'last=%s\n' "$(date +%s)"
+		printf 'success=%s\n' "$result"
+		printf 'failures=%s\n' "$probe_failures_value"
+		printf 'sa_id=%s\n' "$current_sa_id"
+	} >"$probe_state.new"
+	mv "$probe_state.new" "$probe_state"
+}
+
+probe_failure_count() {
+	probe_sa_id="$(sed -n 's/^sa_id=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	[ -n "$probe_sa_id" ] && [ "$probe_sa_id" = "$(source_sa_id)" ] || {
+		printf '%s\n' 0
+		return
+	}
+	value="$(sed -n 's/^failures=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	case "$value" in '' | *[!0-9]*) value=0 ;; esac
+	printf '%s\n' "$value"
+}
+
+probe_recent_success() {
+	[ "$(sed -n 's/^success=//p' "$probe_state" 2>/dev/null | tail -n1)" = 1 ] || return 1
+	probe_sa_id="$(sed -n 's/^sa_id=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	[ -n "$probe_sa_id" ] && [ "$probe_sa_id" = "$(source_sa_id)" ] || return 1
+	last="$(sed -n 's/^last=//p' "$probe_state" 2>/dev/null | tail -n1)"
+	case "$last" in '' | *[!0-9]*) return 1 ;; esac
+	now="$(date +%s)"
+	interval="$(getv probe_interval 60)"
+	[ "$now" -ge "$last" ] && [ $((now - last)) -le $((interval * 2)) ]
+}
+
+dump_pbr_set() {
+	family="$1"
+	dump="$2"
+	set_name="pbr_$(getv interface sitehome)_${family}_dst_ip_ikev2_site_link"
+	"$nft_bin" list set inet fw4 "$set_name" 2>/dev/null |
+		sed -n '/elements = {/,/}/p' | tr -d '\n\t' |
+		sed 's/.*{//; s/}.*//' | tr ',' '\n' |
+		tr -d ' ' | grep -v '^$' >"$dump.new" || true
+	if [ -s "$dump.new" ]; then
+		mv "$dump.new" "$dump"
+	else
+		rm -f "$dump.new"
+	fi
+}
+
+dump_pbr_sets() {
+	source_pbr_ready || return 0
+	dump_pbr_set 4 "$set_dump4"
+	dump_pbr_set 6 "$set_dump6"
+}
+
+persist_pbr_sets() {
+	dump_pbr_sets
+	mkdir -p "${persistent_set_dump4%/*}" "${persistent_set_dump6%/*}"
+	if [ -s "$set_dump4" ]; then
+		cp "$set_dump4" "$persistent_set_dump4.new"
+		chmod 600 "$persistent_set_dump4.new"
+		mv "$persistent_set_dump4.new" "$persistent_set_dump4"
+	fi
+	if [ -s "$set_dump6" ]; then
+		cp "$set_dump6" "$persistent_set_dump6.new"
+		chmod 600 "$persistent_set_dump6.new"
+		mv "$persistent_set_dump6.new" "$persistent_set_dump6"
+	fi
+}
+
+source_vip_ready() {
+	device="$(getv xfrm_device ipsec-home)"
+	vip="$(swanctl --list-sas --raw 2>/dev/null |
+		sed -n 's/.*site-link {.*local-vips=\[\([^]]*\)\].*/\1/p' |
+		tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+		awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && !found { value=$0; found=1 } END { if (found) print value }')"
+	[ -n "$vip" ] || return 1
+	[ "$(ip -4 -o addr show dev "$device" scope global 2>/dev/null |
+		awk 'NR == 1 { sub(/\/.*/, "", $4); print $4 }')" = "$vip" ]
+}
+
+source_control_ready() {
+	device="$(getv xfrm_device ipsec-home)"
+	if_id="$(getv if_id 44)"
+	xfrm_ready "$device" "$if_id" && source_conn_loaded && source_sa_ready && probe_rule_ready &&
+		source_aux_rules_ready &&
+		[ -n "$(source_sa_id)" ] && source_vip_ready && source_pbr_ready && source_routes_ready
+}
+
+exit_control_ready() {
+	device="$(getv exit_device ipsec-site-exit)"
+	if_id="$(getv exit_if_id 45)"
+	xfrm_ready "$device" "$if_id" && exit_conn_loaded && exit_route_ready && exit_pbr_ready
+}
+
+disabled_runtime_ready() {
+	! source_sa_ready && ! exit_sa_ready && ! source_conn_loaded && ! exit_conn_loaded || return 1
+	for device in "$(getv xfrm_device ipsec-home)" "$(getv exit_device ipsec-site-exit)" \
+		"$(applied_get xfrm_device)" "$(applied_get exit_device)"; do
+		[ -n "$device" ] || continue
+		valid_device "$device" || return 1
+		! ip link show "$device" >/dev/null 2>&1 || return 1
+	done
+	for interface in "$(getv interface sitehome)" "$(getv exit_interface siteexit)" \
+		"$(applied_get interface)" "$(applied_get exit_interface)"; do
+		[ -n "$interface" ] || continue
+		valid_uci_name "$interface" || return 1
+		! uci -q get "network.$interface" >/dev/null 2>&1 || return 1
+	done
+	! uci -q get pbr.ikev2_site_link >/dev/null 2>&1 || return 1
+	! uci -q get pbr.ikev2_site_link_include >/dev/null 2>&1 || return 1
+	! ip -4 rule show 2>/dev/null |
+		awk -v priority="$probe_rule_priority:" '$1 == priority { found=1 } END { exit !found }' || return 1
+	for chain in pbr_prerouting pbr_forward mangle_forward; do
+		! "$nft_bin" list chain inet fw4 "$chain" 2>/dev/null |
+			grep -Eq 'IKEv2 Site Link: (YouTube|direct exit WAN)|ikev2-site-link-(force-youtube-tcp|mss-clamp)' || return 1
+	done
+}
+
+repair_source_structure() {
+	device="$(getv xfrm_device ipsec-home)"
+	if_id="$(getv if_id 44)"
+	xfrm_ready "$device" "$if_id" || ensure_xfrm "$device" "$if_id" || return 1
+	ensure_probe_rule || return 1
+	if ! source_conn_loaded; then
+		swanctl --load-conns >/dev/null 2>&1 || return 1
+		swanctl --load-creds --noprompt >/dev/null 2>&1 || return 1
+	fi
+	if source_sa_ready; then
+		sync_vip
+	else
+		reconcile_source_routes
+	fi
+}
+
+repair_exit_structure() {
+	device="$(getv exit_device ipsec-site-exit)"
+	if_id="$(getv exit_if_id 45)"
+	xfrm_ready "$device" "$if_id" || ensure_xfrm "$device" "$if_id" || return 1
+	if ! exit_conn_loaded; then
+		swanctl --load-conns >/dev/null 2>&1 || return 1
+		swanctl --load-pools >/dev/null 2>&1 || return 1
+		swanctl --load-creds --noprompt >/dev/null 2>&1 || return 1
+	fi
+	ensure_exit_route
 }
 
 connect_source() {
-	ensure_xfrm
-	swanctl --load-conns >/dev/null 2>&1
-	swanctl --load-creds >/dev/null 2>&1
+	ensure_xfrm || return 1
+	swanctl --load-conns >/dev/null 2>&1 || return 1
+	swanctl --load-creds >/dev/null 2>&1 || return 1
 	swanctl --initiate --child site-link4 --timeout 20 >/dev/null 2>&1 || true
 	sync_vip
+}
+
+recover_source_data_plane() {
+	reset_source_sa || return 1
+	connect_source || return 1
+	if data_plane_ready; then
+		probe_save 1
+		return 0
+	fi
+	probe_save 0
+	return 1
+}
+
+connect_impl() {
+	validate_config
+	[ "$(getv enabled 0)" = 1 ] || die 'site link is disabled'
+	[ "$(role)" = source ] || die 'connect is valid only on the source router'
+	connect_source
 }
 
 apply_impl() {
@@ -565,46 +1376,99 @@ apply_impl() {
 		disable_impl
 		return
 	fi
+	inactive_role_present &&
+		die 'disable the existing role before changing the router role'
+	applied_resources_match ||
+		die 'disable the existing link before changing its role, interface names, XFRM IDs or pool'
+	exit_pool_route_available ||
+		die 'dedicated tunnel address overlaps an existing local or routed network'
 	if [ "$(role)" = exit ]; then
 		secret_configured || die 'peer secret is not configured'
-		render_exit
-		exit_device="$(getv exit_device ipsec-site-exit)"
-		exit_if_id="$(getv exit_if_id 45)"
-		ensure_xfrm "$exit_device" "$exit_if_id"
 		exit_apply_transaction
 	else
 		secret_configured || die 'peer secret is not configured'
-		render_source
-		ensure_xfrm
 		source_apply_transaction
 	fi
-	/etc/init.d/ikev2-site-link enable >/dev/null 2>&1 || true
-	/etc/init.d/ikev2-site-link restart >/dev/null 2>&1 || true
-	status_write ok 'configuration applied'
+	record_applied_resources
+	"$site_init" enable >/dev/null 2>&1 || true
+	"$site_init" restart >/dev/null 2>&1 || true
+	if [ "$(role)" = source ]; then
+		probe_save 1
+		status_write ok 'configuration applied and data plane verified'
+	else
+		status_write idle 'configuration applied; waiting for peer traffic'
+	fi
 }
 
 disable_impl() {
-	if [ "$(role)" = source ]; then
-		swanctl --terminate --ike site-link --timeout 5 >/dev/null 2>&1 || true
-		printf '%s\n' '# IKEv2 Site Link is disabled.' >"$conn_file.new"
-		atomic_install "$conn_file.new" "$conn_file" 600
-		printf '%s\n' '# IKEv2 Site Link secret is retained outside swanctl.' >"$cred_file.new"
-		atomic_install "$cred_file.new" "$cred_file" 600
-		source_uci_remove
-		device="$(getv xfrm_device ipsec-home)"
-		ip -4 addr flush dev "$device" scope global 2>/dev/null || true
-		ip link set "$device" down 2>/dev/null || true
-	else
-		swanctl --terminate --ike site-link-in --timeout 5 >/dev/null 2>&1 || true
-		printf '%s\n' '# IKEv2 Site Link exit is disabled.' >"$exit_conn_file.new"
-		atomic_install "$exit_conn_file.new" "$exit_conn_file" 600
-		printf '%s\n' '# IKEv2 Site Link exit secret is retained outside swanctl.' >"$exit_cred_file.new"
-		atomic_install "$exit_cred_file.new" "$exit_cred_file" 600
-		exit_uci_remove
-		device="$(getv exit_device ipsec-site-exit)"
-		ip link set "$device" down 2>/dev/null || true
+	from_monitor=0
+	[ "${1:-}" != monitor ] || from_monitor=1
+	cleanup_ok=1
+	applied_source_interface="$(applied_get interface "$(getv interface sitehome)")"
+	applied_source_device="$(applied_get xfrm_device "$(getv xfrm_device ipsec-home)")"
+	applied_source_if_id="$(applied_get if_id "$(getv if_id 44)")"
+	applied_exit_device="$(applied_get exit_device "$(getv exit_device ipsec-site-exit)")"
+	applied_exit_if_id="$(applied_get exit_if_id "$(getv exit_if_id 45)")"
+	applied_exit_pool="$(applied_get exit_pool "$(getv exit_pool 10.253.44.2)")"
+	# Stop procd before touching an SA, address or route. Otherwise an iteration
+	# already in flight can recreate runtime state during teardown.
+	if [ "$from_monitor" = 0 ]; then
+		"$site_init" stop >/dev/null 2>&1 || cleanup_ok=0
 	fi
-	/etc/init.d/ikev2-site-link disable >/dev/null 2>&1 || true
+	# The command is a complete state transition, not just runtime cleanup. In
+	# particular package removal and direct CLI use must not leave a logically
+	# enabled configuration that can be started again later.
+	uci set "$config_name.main.enabled=0" || cleanup_ok=0
+	uci commit "$config_name" || cleanup_ok=0
+	swanctl --terminate --ike site-link --timeout 5 >/dev/null 2>&1 || true
+	swanctl --terminate --ike site-link-in --timeout 5 >/dev/null 2>&1 || true
+	printf '%s\n' '# IKEv2 Site Link is disabled.' >"$conn_file.new"
+	atomic_install "$conn_file.new" "$conn_file" 600
+	printf '%s\n' '# IKEv2 Site Link secret is retained outside swanctl.' >"$cred_file.new"
+	atomic_install "$cred_file.new" "$cred_file" 600
+	printf '%s\n' '# IKEv2 Site Link exit is disabled.' >"$exit_conn_file.new"
+	atomic_install "$exit_conn_file.new" "$exit_conn_file" 600
+	printf '%s\n' '# IKEv2 Site Link exit secret is retained outside swanctl.' >"$exit_cred_file.new"
+	atomic_install "$exit_cred_file.new" "$exit_cred_file" 600
+	swanctl --load-conns >/dev/null 2>&1 || cleanup_ok=0
+	swanctl --load-pools >/dev/null 2>&1 || cleanup_ok=0
+	# load-creds tracks VICI shared-key identifiers and unloads only entries no
+	# longer present on disk; unlike --clear this does not create an authentication
+	# gap for unrelated IKEv2 Manager credentials.
+	swanctl --load-creds --noprompt >/dev/null 2>&1 || cleanup_ok=0
+	delete_probe_rule "$(getv xfrm_device ipsec-home)" "$(getv interface sitehome)" || cleanup_ok=0
+	delete_probe_rule "$applied_source_device" "$applied_source_interface" || cleanup_ok=0
+	all_uci_remove || cleanup_ok=0
+	source_device="$(getv xfrm_device ipsec-home)"
+	exit_device="$(getv exit_device ipsec-site-exit)"
+	exit_pool="$(getv exit_pool 10.253.44.2)"
+	if valid_ipv4 "$exit_pool" && valid_device "$exit_device"; then
+		ip -4 route del "$exit_pool/32" dev "$exit_device" 2>/dev/null || true
+	fi
+	if valid_ipv4 "$applied_exit_pool" && valid_device "$applied_exit_device"; then
+		ip -4 route del "$applied_exit_pool/32" dev "$applied_exit_device" 2>/dev/null || true
+	fi
+	valid_device "$source_device" &&
+		ip -4 addr flush dev "$source_device" scope global 2>/dev/null || true
+	delete_xfrm_candidate "$source_device" "$(getv if_id 44)" || cleanup_ok=0
+	delete_xfrm_candidate "$exit_device" "$(getv exit_if_id 45)" || cleanup_ok=0
+	delete_xfrm_candidate "$applied_source_device" "$applied_source_if_id" || cleanup_ok=0
+	delete_xfrm_candidate "$applied_exit_device" "$applied_exit_if_id" || cleanup_ok=0
+	tries=0
+	while { source_sa_ready || exit_sa_ready; } && [ "$tries" -lt 5 ]; do
+		tries=$((tries + 1))
+		sleep 1
+	done
+	! source_sa_ready && ! exit_sa_ready || cleanup_ok=0
+	! source_conn_loaded && ! exit_conn_loaded || cleanup_ok=0
+	# A later enable must not repopulate PBR sets with addresses learned before
+	# the tunnel was explicitly disabled.
+	rm -f "$probe_state" "$exit_traffic_state" "$set_dump4" "$set_dump6" \
+		"$persistent_set_dump4" "$persistent_set_dump6"
+	uci -q delete "$config_name.applied" || true
+	uci commit "$config_name" || cleanup_ok=0
+	"$site_init" disable >/dev/null 2>&1 || true
+	[ "$cleanup_ok" = 1 ] || die 'site link disabled but runtime cleanup is incomplete'
 	status_write disabled 'site link disabled'
 }
 
@@ -626,6 +1490,7 @@ status_emit() {
 	enabled="$(getv enabled 0)"
 	current_role="$(role)"
 	device="$(getv xfrm_device ipsec-home)"
+	valid_device "$device" || device=invalid
 	printf 'enabled=%s\nrole=%s\nsecret=%s\n' "$enabled" "$current_role" \
 		"$(secret_configured && echo configured || echo missing)"
 	printf 'ike_port=%s\n' "$(getv ike_port 1500)"
@@ -638,10 +1503,15 @@ status_emit() {
 		printf 'rx_bytes=%s\ntx_bytes=%s\n' \
 			"$(cat "/sys/class/net/$device/statistics/rx_bytes" 2>/dev/null || echo 0)" \
 			"$(cat "/sys/class/net/$device/statistics/tx_bytes" 2>/dev/null || echo 0)"
-		printf 'fail_closed=%s\n' "$(ip -4 route show table "pbr_$(getv interface sitehome)" 2>/dev/null |
-			grep -q '^unreachable default' && echo active || echo missing)"
+		printf 'fail_closed=%s\n' "$(source_ipv4_terminal_ready && source_ipv6_terminal_ready &&
+			echo active || echo missing)"
+		printf 'route=%s\npbr=%s\ndata_plane=%s\n' \
+			"$(source_routes_ready && echo healthy || echo missing)" \
+			"$(source_pbr_ready && source_aux_rules_ready && echo healthy || echo missing)" \
+			"$(probe_recent_success && echo verified || echo unverified)"
 	else
 		device="$(getv exit_device ipsec-site-exit)"
+		valid_device "$device" || device=invalid
 		printf 'interface=%s\ninterface_present=%s\n' "$device" \
 			"$([ -d "/sys/class/net/$device" ] && echo 1 || echo 0)"
 		printf 'sa=%s\n' "$(exit_sa_ready && echo connected || echo disconnected)"
@@ -649,106 +1519,174 @@ status_emit() {
 			"$(cat "/sys/class/net/$device/statistics/rx_bytes" 2>/dev/null || echo 0)" \
 			"$(cat "/sys/class/net/$device/statistics/tx_bytes" 2>/dev/null || echo 0)"
 		printf 'vip=%s\nfail_closed=not-applicable\n' "$(getv exit_pool 10.253.44.2)"
+		printf 'route=%s\npbr=%s\ndata_plane=%s\n' \
+			"$(exit_route_ready && echo healthy || echo missing)" \
+			"$(exit_pbr_ready && echo healthy || echo missing)" \
+			"$(exit_traffic_recent && echo verified || echo unverified)"
 	fi
-	[ ! -r "$state_file" ] || cat "$state_file"
-	# Live invariants take precedence over a status file written just before a
-	# PBR or SA transition. Never report OK while fail-closed protection, the
-	# selected-service rule or the active tunnel route is missing.
-	if [ "$enabled" = 1 ] && [ "$current_role" = source ]; then
-		if source_sa_ready && source_pbr_ready && source_fail_closed_ready &&
-		   source_live_route_ready; then
-			printf 'state=ok\ndetail=tunnel and routing invariants are healthy\n'
+	updated="$(sed -n 's/^updated=//p' "$state_file" 2>/dev/null | tail -n1)"
+	[ -z "$updated" ] || printf 'updated=%s\n' "$updated"
+	if [ "$enabled" != 1 ]; then
+		if disabled_runtime_ready; then
+			printf 'state=disabled\ndetail=site link disabled\n'
 		else
-			printf 'state=degraded\ndetail=tunnel or routing invariant is missing\n'
+			printf 'state=degraded\ndetail=disable cleanup is incomplete\n'
 		fi
-	elif [ "$enabled" = 1 ] && [ "$current_role" = exit ]; then
-		if exit_sa_ready; then
-			printf 'state=ok\ndetail=peer is connected\n'
+	elif [ "$current_role" = source ]; then
+		if source_control_ready && probe_recent_success; then
+			printf 'state=ok\ndetail=control plane and bidirectional data plane are healthy\n'
 		else
-			printf 'state=idle\ndetail=waiting for peer\n'
+			printf 'state=degraded\ndetail=control-plane invariant or recent data-plane probe is missing\n'
 		fi
+	elif exit_control_ready && ! exit_sa_ready; then
+		printf 'state=idle\ndetail=exit route is protected; waiting for peer\n'
+	elif exit_control_ready && exit_sa_ready && exit_traffic_recent; then
+		printf 'state=ok\ndetail=exit route, SA and bidirectional traffic are healthy\n'
+	else
+		printf 'state=degraded\ndetail=exit XFRM, route, PBR or bidirectional traffic is missing\n'
 	fi
 	return 0
 }
 
 monitor_loop() {
+	pid_lock_acquire "$monitor_lock_dir" || die 'monitor is already running'
+	monitor_wait_pid=
+	monitor_cleanup() {
+		trap - EXIT HUP INT TERM
+		if [ -n "${monitor_wait_pid:-}" ]; then
+			kill "$monitor_wait_pid" >/dev/null 2>&1 || true
+			wait "$monitor_wait_pid" 2>/dev/null || true
+			monitor_wait_pid=
+		fi
+		# A signal can arrive while a repair owns both action locks. The monitor
+		# handler, rather than the nested helper, owns signal cleanup.
+		locks_release
+		if [ "$(getv enabled 0)" = 1 ] && [ "$(role)" = source ]; then
+			persist_pbr_sets >/dev/null 2>&1 || true
+		fi
+		pid_lock_release "$monitor_lock_dir"
+	}
+	trap 'monitor_cleanup; exit 0' HUP INT TERM
+	trap 'monitor_cleanup' EXIT
+	monitor_wait() {
+		sleep "$1" &
+		monitor_wait_pid=$!
+		wait "$monitor_wait_pid" 2>/dev/null || true
+		monitor_wait_pid=
+	}
 	failures=0
 	first=1
 	last_attempt=0
-	pbr_misses=0
 	last_pbr_repair=0
+	last_aux_repair=0
+	last_set_dump=0
 	while :; do
 		if [ "$(getv enabled 0)" != 1 ]; then
-			status_write disabled 'site link disabled'
-			sleep 30
+			if ! disabled_runtime_ready; then
+				status_write degraded 'disabled configuration still has managed runtime state'
+				try_with_lock disable-reconcile disable_impl monitor >/dev/null 2>&1 || true
+			fi
+			if disabled_runtime_ready; then
+				status_write disabled 'site link disabled'
+			else
+				status_write degraded 'disable cleanup is incomplete'
+			fi
+			[ "${SITE_LINK_MONITOR_ONCE:-0}" = 1 ] && break
+			monitor_wait 30
+			continue
+		fi
+		if ! (validate_config >/dev/null 2>&1); then
+			status_write degraded 'configuration validation failed; no repair attempted'
+			[ "${SITE_LINK_MONITOR_ONCE:-0}" = 1 ] && break
+			monitor_wait 30
 			continue
 		fi
 		if [ "$(role)" = source ]; then
-			# A standalone firewall reload can rebuild fw4 without PBR's dynamic
-			# domain rules. Restore them before declaring the data plane healthy.
-			if source_pbr_ready; then
-				pbr_misses=0
-			else
-				pbr_misses=$((pbr_misses + 1))
-				# Avoid racing PBR while it is still starting or intentionally
-				# rebuilding fw4. Repair only persistent drift.
-				if [ "$pbr_misses" -ge 2 ]; then
-					now="$(date +%s)"
-					# A PBR restart rebuilds fw4. Keep repairs bounded if another
-					# service is repeatedly reloading the firewall.
-					if [ $((now - last_pbr_repair)) -ge 120 ]; then
-						last_pbr_repair="$now"
-						repair_source_pbr >/dev/null 2>&1 || true
-					fi
-					pbr_misses=0
-				fi
+			now="$(date +%s)"
+			if time_due "$now" "$last_set_dump" 60; then
+				dump_pbr_sets >/dev/null 2>&1 || true
+				last_set_dump="$now"
 			fi
-			if [ "$first" = 1 ]; then
-				connect_source >/dev/null 2>&1 || true
+			# XFRM/VIP/default drift is cheap to repair and must be corrected on
+			# every iteration. The operation is skipped while another package owns
+			# the shared network-action lock.
+			if ! source_conn_loaded ||
+			   ! xfrm_ready "$(getv xfrm_device ipsec-home)" "$(getv if_id 44)" ||
+			   ! probe_rule_ready ||
+			   { source_sa_ready && { ! source_vip_ready || ! source_routes_ready; }; } ||
+			   { ! source_sa_ready && { ! source_fail_closed_ready || source_live_route_ready; }; }; then
+				try_with_lock source-reconcile repair_source_structure >/dev/null 2>&1 || true
 			fi
-			# Remove the live default immediately when the CHILD_SA disappears.
-			# The terminal unreachable route then remains the only route in the
-			# policy table until sync_vip restores the encrypted data path.
-			if ! source_sa_ready; then
-				"$pbr_helper" >/dev/null 2>&1 || true
+			if ! source_pbr_ready && time_due "$now" "$last_pbr_repair" 120; then
+				# A failed reload can still disturb forwarding. Rate-limit attempts,
+				# not just successful completions.
+				last_pbr_repair="$now"
+				try_with_lock pbr-reload repair_source_pbr >/dev/null 2>&1 || true
 			fi
-			if source_sa_ready && sync_vip && source_pbr_ready &&
-			   source_fail_closed_ready && source_live_route_ready && data_plane_ready; then
+			if source_pbr_ready && ! source_aux_rules_ready &&
+			   time_due "$now" "$last_aux_repair" 60; then
+				last_aux_repair="$now"
+				try_with_lock nft-reconcile repair_source_aux >/dev/null 2>&1 || true
+			fi
+			if source_sa_ready; then
 				failures=0
-				status_write ok 'tunnel and route are healthy'
 			else
 				failures=$((failures + 1))
-				status_write degraded 'tunnel health check failed'
 				threshold="$(getv failure_threshold 3)"
-				if [ "$failures" -ge "$threshold" ]; then
-					now="$(date +%s)"
-					cooldown="$(getv reconnect_cooldown 30)"
-					if [ $((now - last_attempt)) -ge "$cooldown" ]; then
-						last_attempt="$now"
-						connect_source >/dev/null 2>&1 || true
-					fi
+				[ "$first" = 1 ] && failures="$threshold"
+				cooldown="$(getv reconnect_cooldown 30)"
+				if [ "$failures" -ge "$threshold" ] &&
+				   time_due "$now" "$last_attempt" "$cooldown"; then
+					last_attempt="$now"
+					try_with_lock reconnect connect_source >/dev/null 2>&1 || true
 					failures="$threshold"
 				fi
 			fi
+			if source_control_ready && probe_due "$now"; then
+				if data_plane_ready; then probe_save 1; else probe_save 0; fi
+			fi
+			probe_failures="$(probe_failure_count)"
+			threshold="$(getv failure_threshold 3)"
+			cooldown="$(getv reconnect_cooldown 30)"
+			if source_control_ready && [ "$probe_failures" -ge "$threshold" ] &&
+			   time_due "$now" "$last_attempt" "$cooldown"; then
+				last_attempt="$now"
+				try_with_lock data-reconnect recover_source_data_plane >/dev/null 2>&1 || true
+			fi
+			if source_control_ready && probe_recent_success; then
+				status_write ok 'control plane and bidirectional data plane are healthy'
+			else
+				status_write degraded 'control-plane invariant or data-plane probe failed'
+			fi
 		else
-			if [ "$first" = 1 ]; then
-				device="$(getv exit_device ipsec-site-exit)"
-				if_id="$(getv exit_if_id 45)"
-				ensure_xfrm "$device" "$if_id" >/dev/null 2>&1 || true
-				swanctl --load-conns >/dev/null 2>&1 || true
-				swanctl --load-pools >/dev/null 2>&1 || true
-				swanctl --load-creds --noprompt >/dev/null 2>&1 || true
-				ip -4 route replace "$(getv exit_pool 10.253.44.2)/32" dev "$device" >/dev/null 2>&1 || true
+			now="$(date +%s)"
+			if ! exit_conn_loaded ||
+			   ! xfrm_ready "$(getv exit_device ipsec-site-exit)" "$(getv exit_if_id 45)" ||
+			   ! exit_route_ready; then
+				try_with_lock exit-reconcile repair_exit_structure >/dev/null 2>&1 || true
+			fi
+			if ! exit_pbr_ready && time_due "$now" "$last_pbr_repair" 120; then
+				last_pbr_repair="$now"
+				try_with_lock pbr-reload pbr_reload_checked >/dev/null 2>&1 || true
 			fi
 			if exit_sa_ready; then
-				status_write ok 'peer is connected'
+				exit_traffic_update >/dev/null 2>&1 || true
+			fi
+			if ! exit_control_ready; then
+				status_write degraded 'exit XFRM, route or PBR invariant is missing'
+			elif ! exit_sa_ready; then
+				status_write idle 'exit route is protected; waiting for peer'
+			elif exit_traffic_recent; then
+				status_write ok 'exit route, SA and bidirectional traffic are healthy'
 			else
-				status_write idle 'waiting for peer'
+				status_write degraded 'peer SA has no verified bidirectional traffic'
 			fi
 		fi
 		first=0
-		sleep "$(getv monitor_interval 15)"
+		[ "${SITE_LINK_MONITOR_ONCE:-0}" = 1 ] && break
+		monitor_wait "$(getv monitor_interval 15)"
 	done
+	monitor_cleanup
 }
 
 # Candidate PBR source selectors for the LuCI form, as "device=hint" lines.
@@ -792,12 +1730,12 @@ zones_emit() {
 }
 
 case "${1:-}" in
-	apply) with_lock apply_impl ;;
+	apply) with_lock apply apply_impl ;;
 	sources) sources_emit ;;
 	zones) zones_emit ;;
-	disable) with_lock disable_impl ;;
-	connect) with_lock connect_source ;;
-	secret-set) with_lock consume_secret_input "${2:-}" ;;
+	disable) with_lock disable disable_impl ;;
+	connect) with_lock connect connect_impl ;;
+	secret-set) with_lock secret-set consume_secret_input "${2:-}" ;;
 	status) status_emit ;;
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;

@@ -56,8 +56,10 @@ function bytes(value) {
 function statusPanel(status) {
 	var connected = status.sa === 'connected';
 	var healthy = status.state === 'ok';
+	var disabled = status.state === 'disabled';
 	var role = status.role === 'exit' ? _('Exit router') : _('Source router');
-	var health = healthy ? _('Healthy') : (status.state === 'idle' ? _('Waiting') : _('Needs attention'));
+	var health = healthy ? _('Healthy') : (status.state === 'idle' ? _('Waiting') :
+		(disabled ? _('Disabled') : _('Needs attention')));
 	var detail = status.detail || _('Live state has not been reported yet.');
 	return E('div', {}, [
 		E('div', { 'class': 'ikev2-hero' }, [
@@ -67,16 +69,18 @@ function statusPanel(status) {
 			]),
 			E('div', { 'class': 'ikev2-hero-side' }, [
 				common.pill(connected ? _('Tunnel online') : _('Tunnel offline'), connected ? 'good' : 'bad'),
-				common.pill(health, healthy ? 'good' : (status.state === 'idle' ? 'info' : 'warn'))
+				common.pill(health, healthy ? 'good' : ((status.state === 'idle' || disabled) ? 'info' : 'warn'))
 			])
 		]),
 		E('div', { 'class': 'ikev2-grid' }, [
 			common.card(_('Role'), role, status.interface || '—'),
 			common.card(_('Traffic'), '↓ ' + bytes(status.rx_bytes), _('Sent: ') + bytes(status.tx_bytes)),
-			common.card(_('Tunnel address'), status.vip || '—', _('Dedicated XFRM address')),
+			common.card(_('Tunnel address'), status.vip || '—',
+				_('Data plane: ') + (status.data_plane || _('unverified'))),
 			common.card(_('Protection'), status.fail_closed === 'active' ? _('Fail-closed') :
 				(status.role === 'exit' ? _('WAN only') : _('Unavailable')),
-				_('External IKE port: ') + (status.ike_port || '1500'))
+				_('Route: ') + (status.route || '—') + ' · ' + _('PBR: ') + (status.pbr || '—') +
+				' · UDP/' + (status.ike_port || '1500'))
 		])
 	]);
 }
@@ -192,6 +196,14 @@ return view.extend({
 		option.value('60', '60 ' + _('seconds'));
 		option.datatype = 'range(5,300)';
 		option.rmempty = false;
+
+		option = health.option(form.Value, 'probe_interval', _('Data-plane probe interval'));
+		option.value('60', '60 ' + _('seconds') + ' — ' + _('recommended'));
+		option.value('120', '2 ' + _('minutes'));
+		option.value('300', '5 ' + _('minutes'));
+		option.datatype = 'range(30,3600)';
+		option.rmempty = false;
+		option.description = _('Source HTTPS probe cadence. On the exit router, three times this interval is the maximum age of RX/TX progress. Use the same value on both routers.');
 
 		option = health.option(form.Value, 'failure_threshold', _('Reconnect threshold'));
 		option.value('3', '3 ' + _('checks') + ' — ' + _('recommended'));
