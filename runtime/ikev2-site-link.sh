@@ -507,10 +507,16 @@ firewall_zone_exists() {
 }
 
 pbr_reload_checked() {
-	"$pbr_init" reload >/dev/null || return 1
+	# pbr/procd may return 1 even after completing a successful reload. Treat
+	# the init-script status only as a trigger result and decide from the live
+	# runtime: the service must be running and its fw4 chain must exist.
+	"$pbr_init" reload >/dev/null 2>&1 || true
 	tries=0
-	while [ "$tries" -lt 20 ]; do
-		"$pbr_init" running >/dev/null 2>&1 && return 0
+	while [ "$tries" -lt 30 ]; do
+		if "$pbr_init" running >/dev/null 2>&1 &&
+		   "$nft_bin" list chain inet fw4 pbr_prerouting >/dev/null 2>&1; then
+			return 0
+		fi
 		tries=$((tries + 1))
 		sleep 1
 	done

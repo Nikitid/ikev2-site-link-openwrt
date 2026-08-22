@@ -36,6 +36,11 @@ if grep -Eq '/etc/init\.d/pbr[[:space:]]+restart|pbr_init.*restart' \
 	echo 'direct PBR restart found in runtime' >&2
 	exit 1
 fi
+if grep -Fq '"$pbr_init" reload >/dev/null || return 1' \
+	"$root/runtime/ikev2-site-link.sh"; then
+	echo 'PBR reload still trusts the init-script exit code' >&2
+	exit 1
+fi
 grep -Fq '/var/run/ikev2-action.lock' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'routes-only' "$root/runtime/pbr.user.site-link"
 grep -Fq 'ip -6 route replace unreachable default metric 32767' \
