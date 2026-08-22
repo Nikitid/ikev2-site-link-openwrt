@@ -905,13 +905,13 @@ source_pbr_ready() {
 policy_configuration_ready() {
 	[ -r "$domains_file" ] && [ -r "$addresses_file" ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link 2>/dev/null || true)" = policy ] || return 1
-	[ "$(uci -q get pbr.ikev2_site_link.name 2>/dev/null || true)" =
+	[ "$(uci -q get pbr.ikev2_site_link.name 2>/dev/null || true)" = \
 		'IKEv2 Site Link: selected services' ] || return 1
-	[ "$(uci -q get pbr.ikev2_site_link.interface 2>/dev/null || true)" =
+	[ "$(uci -q get pbr.ikev2_site_link.interface 2>/dev/null || true)" = \
 		"$(getv interface sitehome)" ] || return 1
-	[ "$(uci -q get pbr.ikev2_site_link.src_addr 2>/dev/null || true)" =
+	[ "$(uci -q get pbr.ikev2_site_link.src_addr 2>/dev/null || true)" = \
 		"$(getv source_devices '@br-lan @ipsec-in')" ] || return 1
-	[ "$(uci -q get pbr.ikev2_site_link.dest_addr 2>/dev/null || true)" =
+	[ "$(uci -q get pbr.ikev2_site_link.dest_addr 2>/dev/null || true)" = \
 		"file://$domains_file file://$addresses_file" ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link.enabled 2>/dev/null || true)" = 1 ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link_include 2>/dev/null || true)" = include ] || return 1
