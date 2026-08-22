@@ -493,7 +493,13 @@ cat >"$tmp/bin/service-disable" <<'EOF'
 printf 'service %s\n' "$1" >>"$SITE_LINK_TEST_EVENTS"
 case "$1" in stop | disable | reload | check | running) exit 0 ;; *) exit 1 ;; esac
 EOF
-chmod 755 "$tmp/bin/uci-disable" "$tmp/bin/ip-disable" "$tmp/bin/swanctl-disable" "$tmp/bin/service-disable"
+cat >"$tmp/bin/nft-disable" <<'EOF'
+#!/bin/sh
+[ "$*" = 'list chain inet fw4 pbr_prerouting' ] && exit 0
+case "$*" in 'list chain inet fw4 '*) exit 0 ;; *) exit 1 ;; esac
+EOF
+chmod 755 "$tmp/bin/uci-disable" "$tmp/bin/ip-disable" "$tmp/bin/swanctl-disable" \
+	"$tmp/bin/service-disable" "$tmp/bin/nft-disable"
 mkdir "$tmp/disable-bin" "$tmp/swanctl-conf"
 ln -s "$tmp/bin/uci-disable" "$tmp/disable-bin/uci"
 ln -s "$tmp/bin/ip-disable" "$tmp/disable-bin/ip"
@@ -530,6 +536,7 @@ SITE_LINK_INIT="$tmp/bin/service-disable" \
 SITE_LINK_NETWORK_INIT="$tmp/bin/service-disable" \
 SITE_LINK_FIREWALL_INIT="$tmp/bin/service-disable" \
 SITE_LINK_PBR_INIT="$tmp/bin/service-disable" \
+SITE_LINK_NFT="$tmp/bin/nft-disable" \
 SITE_LINK_FW4="$tmp/bin/service-disable" \
 	sh "$root/runtime/ikev2-site-link.sh" disable
 [ ! -s "$tmp/devices" ]
