@@ -180,6 +180,32 @@ printf '%s\n' '10.253.44.2 dev wan' >"$tmp/exit.route"
 : >"$tmp/server-cert.pem"
 : >"$tmp/server-key.pem"
 printf '%s\n' fixture >"$tmp/server-cert.pem"
+
+# Releases before the full applied snapshot could leave only an applied role.
+# Treat that section as incomplete and migrate the active candidate instead of
+# leaving procd without a monitor after package upgrade.
+cat >"$tmp/migrate.uci" <<'EOF'
+ikev2-site-link.main.enabled=1
+ikev2-site-link.main.role=source
+ikev2-site-link.main.endpoint=vpn.example.net
+ikev2-site-link.main.remote_id=vpn.example.net
+ikev2-site-link.main.peer_user=site-link
+ikev2-site-link.main.source_devices=@br-lan
+ikev2-site-link.applied=state
+ikev2-site-link.applied.role=source
+firewall.ikev2_site_link=zone
+firewall.ikev2_site_link.name=sitehome
+EOF
+PATH="$tmp/bin:/usr/bin:/bin" \
+SITE_LINK_TEST_UCI_STATE="$tmp/migrate.uci" \
+SITE_LINK_UCI_DIR="$tmp/config" \
+SITE_LINK_LOCK="$tmp/migrate-site.lock" \
+IKEV2_ACTION_LOCK="$tmp/migrate-action.lock" \
+IKEV2_ACTION_LOCK_STATUS="$tmp/migrate-action.status" \
+	sh "$root/runtime/ikev2-site-link.sh" migrate-applied
+grep -Fxq 'ikev2-site-link.applied.enabled=1' "$tmp/migrate.uci"
+grep -Fxq 'ikev2-site-link.applied.role=source' "$tmp/migrate.uci"
+grep -Fxq 'ikev2-site-link.applied.endpoint=vpn.example.net' "$tmp/migrate.uci"
 printf '%s\n' fixture >"$tmp/server-key.pem"
 
 run_exit_monitor() {
