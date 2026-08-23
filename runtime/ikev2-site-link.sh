@@ -51,7 +51,12 @@ getv() {
 }
 
 applied_exists() {
-	[ "$(uci -q get "$config_name.applied" 2>/dev/null || true)" = state ]
+	[ "$(uci -q get "$config_name.applied" 2>/dev/null || true)" = state ] &&
+	[ "$(uci -q get "$config_name.applied.enabled" 2>/dev/null || true)" = 1 ] &&
+	case "$(uci -q get "$config_name.applied.role" 2>/dev/null || true)" in
+		source | exit) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 use_candidate_config() {
@@ -808,7 +813,7 @@ applied_get() {
 }
 
 applied_resources_match() {
-	if [ "$(uci -q get "$config_name.applied" 2>/dev/null || true)" = state ]; then
+	if applied_exists; then
 		[ "$(applied_get role)" = "$(role)" ] &&
 		[ "$(applied_get interface)" = "$(getv interface sitehome)" ] &&
 		[ "$(applied_get xfrm_device)" = "$(getv xfrm_device ipsec-home)" ] &&
