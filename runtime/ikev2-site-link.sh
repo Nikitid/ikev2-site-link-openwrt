@@ -605,6 +605,12 @@ zone_for_device() {
 		sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
 		zone="$(uci -q get "firewall.$section.name" 2>/dev/null || true)"
 		valid_uci_name "$zone" || continue
+		for zone_device in $(uci -q get "firewall.$section.device" 2>/dev/null || true); do
+			[ "$zone_device" = "$wanted" ] && {
+				printf '%s\n' "$zone"
+				return 0
+			}
+		done
 		for network in $(uci -q get "firewall.$section.network" 2>/dev/null || true); do
 			[ "$(uci -q get "network.$network.device" 2>/dev/null || true)" = "$wanted" ] && {
 				printf '%s\n' "$zone"

@@ -718,7 +718,7 @@ ikev2-site-link.main.endpoint=new.example.net
 ikev2-site-link.main.remote_id=new.example.net
 ikev2-site-link.main.peer_user=site-link
 ikev2-site-link.main.ike_port=1500
-ikev2-site-link.main.source_devices=@br-lan
+ikev2-site-link.main.source_devices=@br-lan @ipsec-in
 ikev2-site-link.main.inbound_zone=ikev2in
 ikev2-site-link.main.interface=sitehome
 ikev2-site-link.main.xfrm_device=ipsec-home
@@ -741,7 +741,7 @@ ikev2-site-link.applied.endpoint=new.example.net
 ikev2-site-link.applied.remote_id=new.example.net
 ikev2-site-link.applied.peer_user=site-link
 ikev2-site-link.applied.ike_port=1500
-ikev2-site-link.applied.source_devices=@br-lan
+ikev2-site-link.applied.source_devices=@br-lan @ipsec-in
 ikev2-site-link.applied.interface=sitehome
 ikev2-site-link.applied.xfrm_device=ipsec-home
 ikev2-site-link.applied.if_id=44
@@ -768,6 +768,9 @@ network.sitehome.device=ipsec-home
 firewall.lan=zone
 firewall.lan.name=lan
 firewall.lan.network=lan
+firewall.ikev2pbr_in=zone
+firewall.ikev2pbr_in.name=ikev2in
+firewall.ikev2pbr_in.device=ipsec-in
 firewall.ikev2_site_link=zone
 firewall.ikev2_site_link.name=sitehome
 firewall.ikev2_site_link.network=sitehome
@@ -779,10 +782,13 @@ firewall.ikev2_site_link.masq=1
 firewall.ikev2_site_link_src_1=forwarding
 firewall.ikev2_site_link_src_1.src=lan
 firewall.ikev2_site_link_src_1.dest=sitehome
+firewall.ikev2_site_link_src_2=forwarding
+firewall.ikev2_site_link_src_2.src=ikev2in
+firewall.ikev2_site_link_src_2.dest=sitehome
 pbr.ikev2_site_link=policy
 pbr.ikev2_site_link.name=IKEv2 Site Link: selected services
 pbr.ikev2_site_link.interface=sitehome
-pbr.ikev2_site_link.src_addr=@br-lan
+pbr.ikev2_site_link.src_addr=@br-lan @ipsec-in
 pbr.ikev2_site_link.dest_addr=file://POLICY_DOMAINS file://POLICY_ADDRESSES
 pbr.ikev2_site_link.proto=all
 pbr.ikev2_site_link.enabled=1
@@ -803,8 +809,10 @@ case "${1:-}" in
 		case "${2:-}" in
 			firewall)
 				echo 'firewall.lan=zone'
+				echo 'firewall.ikev2pbr_in=zone'
 				echo 'firewall.ikev2_site_link=zone'
 				echo 'firewall.ikev2_site_link_src_1=forwarding'
+				echo 'firewall.ikev2_site_link_src_2=forwarding'
 				;;
 			*) exit 1 ;;
 		esac
@@ -866,6 +874,9 @@ case "$*" in
 		;;
 	'list chain inet fw4 forward_lan')
 		echo 'jump accept_to_sitehome comment "!fw4: Accept lan to sitehome forwarding"'
+		;;
+	'list chain inet fw4 forward_ikev2in')
+		echo 'jump accept_to_sitehome comment "!fw4: Accept ikev2in to sitehome forwarding"'
 		;;
 	*) exit 1 ;;
 esac
@@ -968,6 +979,8 @@ if grep -Eq '^service (enable|restart)$' "$tmp/apply.events"; then
 fi
 grep -Fq 'uci set firewall.ikev2_site_link_src_1.src=lan' "$tmp/apply.events"
 grep -Fq 'uci set firewall.ikev2_site_link_src_1.dest=sitehome' "$tmp/apply.events"
+grep -Fq 'uci set firewall.ikev2_site_link_src_2.src=ikev2in' "$tmp/apply.events"
+grep -Fq 'uci set firewall.ikev2_site_link_src_2.dest=sitehome' "$tmp/apply.events"
 
 # Repeated end-to-end probe failures on the current SA trigger one bounded SA
 # replacement; merely reporting degraded would leave a black-holed tunnel up.
