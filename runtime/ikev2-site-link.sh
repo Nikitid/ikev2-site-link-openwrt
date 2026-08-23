@@ -7,6 +7,8 @@ config_name="${SITE_LINK_CONFIG:-ikev2-site-link}"
 uci_dir="${SITE_LINK_UCI_DIR:-/etc/config}"
 state_file="${SITE_LINK_STATE:-/var/run/ikev2-site-link.status}"
 secret_file="${SITE_LINK_SECRET:-/etc/ikev2-site-link/client.secret}"
+pending_secret_file="${SITE_LINK_PENDING_SECRET:-/etc/ikev2-site-link/client.secret.pending}"
+previous_secret_file="${SITE_LINK_PREVIOUS_SECRET:-/etc/ikev2-site-link/client.secret.previous}"
 domains_file="${SITE_LINK_DOMAINS:-/etc/ikev2-site-link/domains.txt}"
 addresses_file="${SITE_LINK_ADDRESSES:-/etc/ikev2-site-link/addresses.txt}"
 conn_file="${SITE_LINK_CONN:-/etc/swanctl/conf.d/40-site-link.conf}"
@@ -14,6 +16,7 @@ cred_file="${SITE_LINK_CRED:-/etc/swanctl/conf.d/92-site-link-secret.conf}"
 exit_conn_file="${SITE_LINK_EXIT_CONN:-/etc/swanctl/conf.d/41-site-link-exit.conf}"
 exit_cred_file="${SITE_LINK_EXIT_CRED:-/etc/swanctl/conf.d/93-site-link-exit-secret.conf}"
 pbr_helper="${SITE_LINK_PBR_HELPER:-/usr/share/pbr/pbr.user.site-link}"
+pbr_runtime_config="${SITE_LINK_PBR_RUNTIME_CONFIG:-/var/run/ikev2-site-link-pbr.conf}"
 lock_dir="${SITE_LINK_LOCK:-/var/run/ikev2-site-link.lock}"
 monitor_lock_dir="${SITE_LINK_MONITOR_LOCK:-/var/run/ikev2-site-link-monitor.lock}"
 action_lock_dir="${IKEV2_ACTION_LOCK:-/var/run/ikev2-action.lock}"
@@ -34,13 +37,30 @@ persistent_set_dump4="${SITE_LINK_PERSISTENT_SET_DUMP4:-/etc/ikev2-site-link/pbr
 persistent_set_dump6="${SITE_LINK_PERSISTENT_SET_DUMP6:-/etc/ikev2-site-link/pbr-set6.dump}"
 rollback_root="${SITE_LINK_ROLLBACK_ROOT:-/var/run}"
 secret_input_dir="${SITE_LINK_SECRET_INPUT_DIR:-/var/run}"
+server_cert_file="${SITE_LINK_SERVER_CERT:-/etc/swanctl/x509/ikev2.pem}"
+server_key_file="${SITE_LINK_SERVER_KEY:-/etc/swanctl/private/ikev2.key}"
+config_section=main
+action_lock_owned=0
 
 uci() {
 	command uci -c "$uci_dir" "$@"
 }
 
 getv() {
-	uci -q get "$config_name.main.$1" 2>/dev/null || printf '%s\n' "${2:-}"
+	uci -q get "$config_name.$config_section.$1" 2>/dev/null || printf '%s\n' "${2:-}"
+}
+
+applied_exists() {
+	[ "$(uci -q get "$config_name.applied" 2>/dev/null || true)" = state ]
+}
+
+use_candidate_config() {
+	config_section=main
+}
+
+use_applied_config() {
+	applied_exists || return 1
+	config_section=applied
 }
 
 die() {
@@ -147,6 +167,7 @@ action_lock_acquire() {
 		rm -f "$action_lock_status"
 		rmdir "$action_lock_dir" 2>/dev/null || true
 	done
+	action_lock_owned=1
 	{
 		printf 'owner=site-link\n'
 		printf 'action_id=%s\n' "$action"
@@ -157,10 +178,12 @@ action_lock_acquire() {
 }
 
 action_lock_release() {
-	[ "$(sed -n 's/^pid=//p' "$action_lock_status" 2>/dev/null | tail -n1)" = "$$" ] ||
-		return 0
+	[ "$action_lock_owned" = 1 ] || return 0
+	owner_pid="$(sed -n 's/^pid=//p' "$action_lock_status" 2>/dev/null | tail -n1)"
+	[ -z "$owner_pid" ] || [ "$owner_pid" = "$$" ] || return 0
 	rm -f "$action_lock_status"
 	rmdir "$action_lock_dir" 2>/dev/null || true
+	action_lock_owned=0
 }
 
 locks_release() {
@@ -240,14 +263,16 @@ validate_config() {
 	exit_interface="$(getv exit_interface siteexit)"
 	device="$(getv xfrm_device ipsec-home)"
 	exit_device="$(getv exit_device ipsec-site-exit)"
-	inbound_zone="$(getv inbound_zone ikev2in)"
 	exit_wan="$(getv exit_wan wan)"
+	exit_wan_zone="$(getv exit_wan_zone "$exit_wan")"
+	source_wan="$(getv source_wan wan)"
 	valid_uci_name "$interface" || die 'invalid source network name'
 	valid_uci_name "$exit_interface" || die 'invalid exit network name'
 	valid_device "$device" || die 'invalid source XFRM device name'
 	valid_device "$exit_device" || die 'invalid exit XFRM device name'
-	valid_uci_name "$inbound_zone" || die 'invalid inbound firewall zone name'
-	valid_uci_name "$exit_wan" || die 'invalid exit WAN zone name'
+	valid_uci_name "$exit_wan" || die 'invalid exit WAN network/interface name'
+	valid_uci_name "$exit_wan_zone" || die 'invalid exit WAN firewall zone name'
+	valid_uci_name "$source_wan" || die 'invalid source WAN network name'
 	[ "$interface" != "$exit_interface" ] || die 'source and exit network names must differ'
 	[ "$device" != "$exit_device" ] || die 'source and exit XFRM device names must differ'
 	exit_pool="$(getv exit_pool 10.253.44.2)"
@@ -259,7 +284,7 @@ validate_config() {
 		valid_name "$endpoint" || die 'invalid source endpoint'
 		[ -n "$remote_id" ] || die 'remote identity is required'
 		valid_name "$remote_id" || die 'invalid remote identity'
-		valid_source_selectors "$(getv source_devices '@br-lan @ipsec-in')" ||
+		valid_source_selectors "$(getv source_devices '@br-lan')" ||
 			die 'protected sources must be @device selectors'
 	else
 		remote_id="$(getv remote_id)"
@@ -296,19 +321,82 @@ consume_secret_input() {
 		die 'secret must not contain control characters'
 	fi
 	mkdir -p "${secret_file%/*}"
-	cp "$input" "$secret_file.new"
+	target="$pending_secret_file"
+	# Initial provisioning has nothing to rotate and is made active immediately.
+	# Every later update is staged so editing one router cannot silently replace
+	# the credential used by a live peer.
+	[ -s "$secret_file" ] || target="$secret_file"
+	cp "$input" "$target.new"
 	rm -f "$input"
+	atomic_install "$target.new" "$target" 600
+}
+
+secret_pending() {
+	[ -s "$pending_secret_file" ]
+}
+
+restore_previous_secret() {
+	[ -s "$previous_secret_file" ] || return 1
+	cp "$previous_secret_file" "$secret_file.new" || return 1
 	atomic_install "$secret_file.new" "$secret_file" 600
-	[ "$(getv enabled 0)" = 1 ] || return 0
+}
+
+load_active_secret() {
 	if [ "$(role)" = exit ]; then
-		render_exit
+		render_exit || return 1
 		swanctl --load-creds --noprompt >/dev/null 2>&1
 	else
-		render_source
-		# Load the complete on-disk credential set without clearing the live
-		# credential store first. Clearing creates an avoidable authentication
-		# gap for unrelated IKEv2 Manager connections on the same router.
+		render_source || return 1
 		swanctl --load-creds --noprompt >/dev/null 2>&1
+	fi
+}
+
+activate_secret_impl() {
+	live=1
+	use_applied_config || { use_candidate_config; live=0; }
+	secret_pending || die 'no replacement secret is staged'
+	secret_configured || die 'active peer secret is missing'
+	cp "$secret_file" "$previous_secret_file.new" || die 'unable to back up active secret'
+	atomic_install "$previous_secret_file.new" "$previous_secret_file" 600 ||
+		die 'unable to back up active secret'
+	cp "$pending_secret_file" "$secret_file.new" || die 'unable to activate staged secret'
+	atomic_install "$secret_file.new" "$secret_file" 600 || die 'unable to activate staged secret'
+	if [ "$live" = 0 ]; then
+		rm -f "$pending_secret_file"
+		return 0
+	fi
+	if [ "$(role)" = exit ]; then
+		if ! load_active_secret; then
+			restore_previous_secret >/dev/null 2>&1 || true
+			load_active_secret >/dev/null 2>&1 || true
+			die 'secret activation failed; previous exit credential restored'
+		fi
+		# Do not terminate the current SA. Activate the exit first, then the
+		# source; the established tunnel survives the short credential handoff.
+		rm -f "$pending_secret_file"
+		return 0
+	fi
+	if (set -e; load_active_secret; reset_source_sa; connect_source; source_control_ready); then
+		rm -f "$pending_secret_file"
+		if data_plane_ready; then probe_save 1; else probe_save 0; fi
+		return 0
+	fi
+	restore_previous_secret >/dev/null 2>&1 || true
+	load_active_secret >/dev/null 2>&1 || true
+	reset_source_sa >/dev/null 2>&1 || true
+	connect_source >/dev/null 2>&1 || true
+	die 'secret activation failed; previous source credential restored locally; restore the previous exit credential before reconnecting'
+}
+
+rollback_secret_impl() {
+	live=1
+	use_applied_config || { use_candidate_config; live=0; }
+	restore_previous_secret || die 'no previous secret is available'
+	[ "$live" = 1 ] || return 0
+	load_active_secret || die 'previous secret restored on disk but credential reload failed'
+	if [ "$(role)" = source ]; then
+		reset_source_sa >/dev/null 2>&1 || true
+		connect_source || die 'previous secret restored but source reconnect failed'
 	fi
 }
 
@@ -506,6 +594,41 @@ firewall_zone_exists() {
 	return 1
 }
 
+zone_for_device() {
+	wanted="$1"
+	for section in $(uci show firewall 2>/dev/null |
+		sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+		zone="$(uci -q get "firewall.$section.name" 2>/dev/null || true)"
+		valid_uci_name "$zone" || continue
+		for network in $(uci -q get "firewall.$section.network" 2>/dev/null || true); do
+			[ "$(uci -q get "network.$network.device" 2>/dev/null || true)" = "$wanted" ] && {
+				printf '%s\n' "$zone"
+				return 0
+			}
+		done
+	done
+	return 1
+}
+
+source_forwarding_zones() {
+	seen=' '
+	for selector in $(getv source_devices '@br-lan'); do
+		zone="$(zone_for_device "${selector#@}")" || return 1
+		case "$seen" in *" $zone "*) continue ;; esac
+		printf '%s\n' "$zone"
+		seen="$seen$zone "
+	done
+}
+
+remove_source_forwardings() {
+	for section in $(uci show firewall 2>/dev/null |
+		sed -n 's/^firewall\.\(ikev2_site_link_src_[0-9][0-9]*\)=forwarding$/\1/p'); do
+		uci -q delete "firewall.$section" || true
+	done
+	uci -q delete firewall.ikev2_site_link_forward || true
+	uci -q delete firewall.ikev2_site_link_inbound || true
+}
+
 pbr_reload_checked() {
 	# pbr/procd may return 1 even after completing a successful reload. Treat
 	# the init-script status only as a trigger result and decide from the live
@@ -530,11 +653,27 @@ reload_routing_services() {
 	pbr_reload_checked
 }
 
+render_pbr_runtime_config() {
+	interface="$(getv interface sitehome)"
+	device="$(getv xfrm_device ipsec-home)"
+	force_tcp="$(getv force_tcp 1)"
+	valid_uci_name "$interface" && valid_device "$device" || return 1
+	[ "$force_tcp" = 0 ] || [ "$force_tcp" = 1 ] || return 1
+	mkdir -p "${pbr_runtime_config%/*}"
+	{
+		printf 'interface=%s\n' "$interface"
+		printf 'device=%s\n' "$device"
+		printf 'force_tcp=%s\n' "$force_tcp"
+	} >"$pbr_runtime_config.new"
+	atomic_install "$pbr_runtime_config.new" "$pbr_runtime_config" 600
+}
+
 source_uci_apply() {
 	device="$(getv xfrm_device ipsec-home)"
 	interface="$(getv interface sitehome)"
-	sources="$(getv source_devices '@br-lan @ipsec-in')"
-	inbound_zone="$(getv inbound_zone ikev2in)"
+	sources="$(getv source_devices '@br-lan')"
+	zones="$(source_forwarding_zones)" || return 1
+	render_pbr_runtime_config || return 1
 	uci set "network.$interface=interface"
 	uci set "network.$interface.proto=none"
 	uci set "network.$interface.device=$device"
@@ -546,16 +685,15 @@ source_uci_apply() {
 	uci set firewall.ikev2_site_link.forward=REJECT
 	uci set firewall.ikev2_site_link.mtu_fix=1
 	uci set firewall.ikev2_site_link.masq=1
-	uci set firewall.ikev2_site_link_forward=forwarding
-	uci set firewall.ikev2_site_link_forward.src=lan
-	uci set firewall.ikev2_site_link_forward.dest="$interface"
-	if firewall_zone_exists "$inbound_zone"; then
-		uci set firewall.ikev2_site_link_inbound=forwarding
-		uci set firewall.ikev2_site_link_inbound.src="$inbound_zone"
-		uci set firewall.ikev2_site_link_inbound.dest="$interface"
-	else
-		uci -q delete firewall.ikev2_site_link_inbound || true
-	fi
+	remove_source_forwardings
+	index=1
+	for source_zone in $zones; do
+		section="ikev2_site_link_src_$index"
+		uci set "firewall.$section=forwarding"
+		uci set "firewall.$section.src=$source_zone"
+		uci set "firewall.$section.dest=$interface"
+		index=$((index + 1))
+	done
 	if ! uci -q get pbr.config.supported_interface 2>/dev/null |
 		tr ' ' '\n' | grep -Fxq "$interface"; then
 		uci add_list "pbr.config.supported_interface=$interface"
@@ -586,6 +724,7 @@ exit_uci_apply() {
 	interface="$(getv exit_interface siteexit)"
 	device="$(getv exit_device ipsec-site-exit)"
 	wan="$(getv exit_wan wan)"
+	wan_zone="$(getv exit_wan_zone "$wan")"
 	exit_pool="$(getv exit_pool 10.253.44.2)"
 	ike_port="$(getv ike_port 1500)"
 	uci set "network.$interface=interface"
@@ -600,14 +739,14 @@ exit_uci_apply() {
 	uci set firewall.ikev2_site_link_exit.mtu_fix=1
 	uci set firewall.ikev2_site_link_exit_wan=forwarding
 	uci set firewall.ikev2_site_link_exit_wan.src="$interface"
-	uci set firewall.ikev2_site_link_exit_wan.dest="$wan"
+	uci set firewall.ikev2_site_link_exit_wan.dest="$wan_zone"
 	# A custom IKE port carries both IKE (with a non-ESP marker) and UDP-
 	# encapsulated ESP. Translate it to strongSwan's NAT-T socket, not its
 	# plain UDP/500 socket. The distinct public five-tuple avoids collisions
 	# with a road-warrior IKE session between the same two public routers.
 	uci set firewall.ikev2_site_link_ike=redirect
 	uci set firewall.ikev2_site_link_ike.name='IKEv2 Site Link: dedicated IKE port'
-	uci set firewall.ikev2_site_link_ike.src="$wan"
+	uci set firewall.ikev2_site_link_ike.src="$wan_zone"
 	uci set firewall.ikev2_site_link_ike.proto='udp'
 	uci set firewall.ikev2_site_link_ike.src_dport="$ike_port"
 	uci set firewall.ikev2_site_link_ike.dest_port='4500'
@@ -642,6 +781,7 @@ all_uci_remove() {
 		ikev2_site_link_exit ikev2_site_link_exit_wan ikev2_site_link_ike; do
 		uci -q delete "firewall.$section" || true
 	done
+	remove_source_forwardings
 	uci -q delete pbr.ikev2_site_link || true
 	uci -q delete pbr.ikev2_site_link_include || true
 	uci -q del_list "pbr.config.supported_interface=$source_interface" || true
@@ -650,6 +790,7 @@ all_uci_remove() {
 	uci commit firewall || return 1
 	uci commit pbr || return 1
 	reload_routing_services
+	rm -f "$pbr_runtime_config"
 }
 
 inactive_role_present() {
@@ -705,20 +846,42 @@ applied_resources_match() {
 
 record_applied_resources() {
 	uci set "$config_name.applied=state"
-	uci set "$config_name.applied.role=$(role)"
-	uci set "$config_name.applied.interface=$(getv interface sitehome)"
-	uci set "$config_name.applied.xfrm_device=$(getv xfrm_device ipsec-home)"
-	uci set "$config_name.applied.if_id=$(getv if_id 44)"
-	uci set "$config_name.applied.exit_interface=$(getv exit_interface siteexit)"
-	uci set "$config_name.applied.exit_device=$(getv exit_device ipsec-site-exit)"
-	uci set "$config_name.applied.exit_if_id=$(getv exit_if_id 45)"
-	uci set "$config_name.applied.exit_pool=$(getv exit_pool 10.253.44.2)"
+	for option in enabled role endpoint remote_id peer_user ike_port source_devices \
+		source_wan interface xfrm_device if_id exit_interface exit_device \
+		exit_if_id exit_pool exit_wan exit_wan_zone mtu dpd monitor_interval \
+		probe_interval failure_threshold reconnect_cooldown force_tcp; do
+		value="$(getv "$option")"
+		[ -n "$value" ] && uci set "$config_name.applied.$option=$value" ||
+			uci -q delete "$config_name.applied.$option" || true
+	done
+	uci set "$config_name.applied.enabled=1"
 	uci commit "$config_name"
+}
+
+migrate_applied_impl() {
+	applied_exists && return 0
+	[ "$(getv enabled 0)" = 1 ] || return 0
+	if uci -q get firewall.ikev2_site_link >/dev/null 2>&1 ||
+	   uci -q get firewall.ikev2_site_link_exit >/dev/null 2>&1; then
+		validate_config
+		record_applied_resources
+	fi
+}
+
+candidate_applied_match() {
+	applied_exists || return 1
+	for option in enabled role endpoint remote_id peer_user ike_port source_devices \
+		source_wan interface xfrm_device if_id exit_interface exit_device exit_if_id exit_pool \
+		exit_wan exit_wan_zone mtu dpd monitor_interval probe_interval \
+		failure_threshold reconnect_cooldown force_tcp; do
+		[ "$(uci -q get "$config_name.main.$option" 2>/dev/null || true)" = \
+			"$(uci -q get "$config_name.applied.$option" 2>/dev/null || true)" ] || return 1
+	done
 }
 
 rollback_cleanup() {
 	directory="$1"
-	for file in network firewall pbr conn cred conn.missing cred.missing; do
+	for file in network firewall pbr conn cred pbr-runtime conn.missing cred.missing pbr-runtime.missing; do
 		rm -f "$directory/$file"
 	done
 	rmdir "$directory" 2>/dev/null || true
@@ -772,6 +935,10 @@ source_apply_transaction() {
 		rollback_cleanup "$rollback_dir"
 		die 'unable to back up source credential'
 	}
+	rollback_file_backup "$pbr_runtime_config" "$rollback_dir/pbr-runtime" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up PBR runtime snapshot'
+	}
 	had_previous=0
 	grep -Fq 'site-link {' "$rollback_dir/conn" 2>/dev/null && had_previous=1
 	# Do not validate a changed endpoint, identity or credential through an SA
@@ -788,6 +955,7 @@ source_apply_transaction() {
 	done
 	rollback_file_restore "$rollback_dir/conn" "$conn_file" || rollback_ok=0
 	rollback_file_restore "$rollback_dir/cred" "$cred_file" || rollback_ok=0
+	rollback_file_restore "$rollback_dir/pbr-runtime" "$pbr_runtime_config" || rollback_ok=0
 	"$network_init" reload >/dev/null 2>&1 || rollback_ok=0
 	"$firewall_init" reload >/dev/null 2>&1 || rollback_ok=0
 	pbr_reload_checked >/dev/null 2>&1 || rollback_ok=0
@@ -916,13 +1084,128 @@ policy_configuration_ready() {
 	[ "$(uci -q get pbr.ikev2_site_link.interface 2>/dev/null || true)" = \
 		"$(getv interface sitehome)" ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link.src_addr 2>/dev/null || true)" = \
-		"$(getv source_devices '@br-lan @ipsec-in')" ] || return 1
+		"$(getv source_devices '@br-lan')" ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link.dest_addr 2>/dev/null || true)" = \
 		"file://$domains_file file://$addresses_file" ] || return 1
+	[ "$(uci -q get pbr.ikev2_site_link.proto 2>/dev/null || true)" = all ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link.enabled 2>/dev/null || true)" = 1 ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link_include 2>/dev/null || true)" = include ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link_include.path 2>/dev/null || true)" = "$pbr_helper" ] || return 1
 	[ "$(uci -q get pbr.ikev2_site_link_include.enabled 2>/dev/null || true)" = 1 ]
+}
+
+global_pbr_contract_ready() {
+	[ "$(uci -q get pbr.config.enabled 2>/dev/null || echo 0)" = 1 ] &&
+	[ "$(uci -q get pbr.config.strict_enforcement 2>/dev/null || echo 0)" = 1 ]
+}
+
+global_dns_contract_ready() {
+	[ "$(uci -q get pbr.config.resolver_set 2>/dev/null || true)" = dnsmasq.nftset ]
+}
+
+server_certificate_ready() {
+	[ -s "$server_cert_file" ] && [ -s "$server_key_file" ]
+}
+
+validate_dependency_contract() {
+	global_pbr_contract_ready ||
+		die 'global PBR contract requires enabled=1 and strict_enforcement=1'
+	if [ "$(role)" = source ]; then
+		global_dns_contract_ready ||
+			die 'source DNS classifier contract requires pbr resolver_set=dnsmasq.nftset'
+	else
+		server_certificate_ready ||
+			die 'exit certificate contract requires ikev2.pem and ikev2.key files'
+	fi
+}
+
+source_forwardings_ready() {
+	interface="$(getv interface sitehome)"
+	zones="$(source_forwarding_zones)" || return 1
+	index=1
+	for source_zone in $zones; do
+		section="ikev2_site_link_src_$index"
+		[ "$(uci -q get "firewall.$section" 2>/dev/null || true)" = forwarding ] || return 1
+		[ "$(uci -q get "firewall.$section.src" 2>/dev/null || true)" = "$source_zone" ] || return 1
+		[ "$(uci -q get "firewall.$section.dest" 2>/dev/null || true)" = "$interface" ] || return 1
+		index=$((index + 1))
+	done
+	[ "$(uci show firewall 2>/dev/null |
+		sed -n 's/^firewall\.ikev2_site_link_src_\([0-9][0-9]*\)=forwarding$/\1/p' |
+		wc -l | tr -d ' ')" = "$((index - 1))" ]
+}
+
+source_firewall_runtime_ready() {
+	interface="$(getv interface sitehome)"
+	zones="$(source_forwarding_zones)" || return 1
+	for source_zone in $zones; do
+		"$nft_bin" list chain inet fw4 "forward_$source_zone" 2>/dev/null |
+			grep -Fq "jump accept_to_$interface" || return 1
+	done
+}
+
+exit_firewall_runtime_ready() {
+	interface="$(getv exit_interface siteexit)"
+	wan_zone="$(getv exit_wan_zone "$(getv exit_wan wan)")"
+	ike_port="$(getv ike_port 1500)"
+	"$nft_bin" list chain inet fw4 "forward_$interface" 2>/dev/null |
+		grep -Fq "jump accept_to_$wan_zone" || return 1
+	"$nft_bin" list chain inet fw4 "dstnat_$wan_zone" 2>/dev/null |
+		grep -F "udp dport $ike_port" |
+		grep -Fq 'comment "!fw4: IKEv2 Site Link: dedicated IKE port"'
+}
+
+source_managed_config_ready() {
+	interface="$(getv interface sitehome)"
+	device="$(getv xfrm_device ipsec-home)"
+	[ "$(uci -q get "network.$interface" 2>/dev/null || true)" = interface ] &&
+	[ "$(uci -q get "network.$interface.proto" 2>/dev/null || true)" = none ] &&
+	[ "$(uci -q get "network.$interface.device" 2>/dev/null || true)" = "$device" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link 2>/dev/null || true)" = zone ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.name 2>/dev/null || true)" = "$interface" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.network 2>/dev/null || true)" = "$interface" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.input 2>/dev/null || true)" = REJECT ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.output 2>/dev/null || true)" = ACCEPT ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.forward 2>/dev/null || true)" = REJECT ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.mtu_fix 2>/dev/null || true)" = 1 ] &&
+	[ "$(uci -q get firewall.ikev2_site_link.masq 2>/dev/null || true)" = 1 ] &&
+	source_forwardings_ready && source_firewall_runtime_ready && policy_configuration_ready
+}
+
+exit_managed_config_ready() {
+	interface="$(getv exit_interface siteexit)"
+	device="$(getv exit_device ipsec-site-exit)"
+	wan="$(getv exit_wan wan)"
+	wan_zone="$(getv exit_wan_zone "$wan")"
+	ike_port="$(getv ike_port 1500)"
+	[ "$(uci -q get "network.$interface" 2>/dev/null || true)" = interface ] &&
+	[ "$(uci -q get "network.$interface.proto" 2>/dev/null || true)" = none ] &&
+	[ "$(uci -q get "network.$interface.device" 2>/dev/null || true)" = "$device" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit 2>/dev/null || true)" = zone ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit.name 2>/dev/null || true)" = "$interface" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit.network 2>/dev/null || true)" = "$interface" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit.input 2>/dev/null || true)" = REJECT ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit.output 2>/dev/null || true)" = ACCEPT ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit.forward 2>/dev/null || true)" = REJECT ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit.mtu_fix 2>/dev/null || true)" = 1 ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit_wan 2>/dev/null || true)" = forwarding ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit_wan.src 2>/dev/null || true)" = "$interface" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_exit_wan.dest 2>/dev/null || true)" = "$wan_zone" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike 2>/dev/null || true)" = redirect ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.src 2>/dev/null || true)" = "$wan_zone" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.name 2>/dev/null || true)" = 'IKEv2 Site Link: dedicated IKE port' ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.proto 2>/dev/null || true)" = udp ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.src_dport 2>/dev/null || true)" = "$ike_port" ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.dest_port 2>/dev/null || true)" = 4500 ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.family 2>/dev/null || true)" = ipv4 ] &&
+	[ "$(uci -q get firewall.ikev2_site_link_ike.target 2>/dev/null || true)" = DNAT ] &&
+	[ "$(uci -q get pbr.ikev2_site_link 2>/dev/null || true)" = policy ] &&
+	[ "$(uci -q get pbr.ikev2_site_link.name 2>/dev/null || true)" = 'IKEv2 Site Link: direct exit WAN' ] &&
+	[ "$(uci -q get pbr.ikev2_site_link.interface 2>/dev/null || true)" = "$wan" ] &&
+	[ "$(uci -q get pbr.ikev2_site_link.src_addr 2>/dev/null || true)" = "@$device" ] &&
+	[ "$(uci -q get pbr.ikev2_site_link.proto 2>/dev/null || true)" = all ] &&
+	[ "$(uci -q get pbr.ikev2_site_link.enabled 2>/dev/null || true)" = 1 ] &&
+	exit_firewall_runtime_ready
 }
 
 policy_reload_impl() {
@@ -930,11 +1213,12 @@ policy_reload_impl() {
 	# the saved policy files but must not create a live PBR path.
 	[ "$(getv enabled 0)" = 1 ] && [ "$(role)" = source ] || return 0
 	validate_config
+	render_pbr_runtime_config || return 1
 	policy_configuration_ready || {
 		uci set pbr.ikev2_site_link=policy
 		uci set pbr.ikev2_site_link.name='IKEv2 Site Link: selected services'
 		uci set pbr.ikev2_site_link.interface="$(getv interface sitehome)"
-		uci set pbr.ikev2_site_link.src_addr="$(getv source_devices '@br-lan @ipsec-in')"
+		uci set pbr.ikev2_site_link.src_addr="$(getv source_devices '@br-lan')"
 		uci set pbr.ikev2_site_link.dest_addr="file://$domains_file file://$addresses_file"
 		uci set pbr.ikev2_site_link.proto='all'
 		uci set pbr.ikev2_site_link.enabled=1
@@ -1077,6 +1361,7 @@ reconcile_source_routes() {
 }
 
 repair_source_pbr() {
+	render_pbr_runtime_config || return 1
 	pbr_reload_checked || return 1
 	ensure_probe_rule || return 1
 	repair_source_aux || return 1
@@ -1336,6 +1621,7 @@ source_vip_ready() {
 source_control_ready() {
 	device="$(getv xfrm_device ipsec-home)"
 	if_id="$(getv if_id 44)"
+	global_pbr_contract_ready && global_dns_contract_ready && source_managed_config_ready &&
 	xfrm_ready "$device" "$if_id" && source_conn_loaded && source_sa_ready && probe_rule_ready &&
 		source_aux_rules_ready &&
 		[ -n "$(source_sa_id)" ] && source_vip_ready && source_pbr_ready && source_routes_ready
@@ -1344,6 +1630,7 @@ source_control_ready() {
 exit_control_ready() {
 	device="$(getv exit_device ipsec-site-exit)"
 	if_id="$(getv exit_if_id 45)"
+	server_certificate_ready && global_pbr_contract_ready && exit_managed_config_ready &&
 	xfrm_ready "$device" "$if_id" && exit_conn_loaded && exit_route_ready && exit_pbr_ready
 }
 
@@ -1399,6 +1686,14 @@ repair_exit_structure() {
 	ensure_exit_route
 }
 
+repair_source_managed_config() {
+	source_uci_apply
+}
+
+repair_exit_managed_config() {
+	exit_uci_apply
+}
+
 connect_source() {
 	ensure_xfrm || return 1
 	swanctl --load-conns >/dev/null 2>&1 || return 1
@@ -1426,11 +1721,13 @@ connect_impl() {
 }
 
 apply_impl() {
+	use_candidate_config
 	validate_config
 	if [ "$(getv enabled 0)" != 1 ]; then
 		disable_impl
 		return
 	fi
+	validate_dependency_contract
 	inactive_role_present &&
 		die 'disable the existing role before changing the router role'
 	applied_resources_match ||
@@ -1459,6 +1756,9 @@ disable_impl() {
 	from_monitor=0
 	[ "${1:-}" != monitor ] || from_monitor=1
 	cleanup_ok=1
+	# Teardown targets the last successfully applied snapshot. Candidate values
+	# may already contain a rejected role, interface or XFRM identifier.
+	use_applied_config || use_candidate_config
 	applied_source_interface="$(applied_get interface "$(getv interface sitehome)")"
 	applied_source_device="$(applied_get xfrm_device "$(getv xfrm_device ipsec-home)")"
 	applied_source_if_id="$(applied_get if_id "$(getv if_id 44)")"
@@ -1542,12 +1842,25 @@ EOF
 }
 
 status_emit() {
-	enabled="$(getv enabled 0)"
+	candidate_enabled="$(uci -q get "$config_name.main.enabled" 2>/dev/null || echo 0)"
+	candidate_role="$(uci -q get "$config_name.main.role" 2>/dev/null || echo source)"
+	if use_applied_config; then
+		enabled="$(getv enabled 0)"
+		printf 'prepared=%s\napplied=1\nconfiguration=%s\ncandidate_role=%s\n' \
+			"$candidate_enabled" \
+			"$(candidate_applied_match && echo applied || echo prepared)" "$candidate_role"
+	else
+		enabled=0
+		config_section=main
+		printf 'prepared=%s\napplied=0\nconfiguration=prepared\ncandidate_role=%s\n' \
+			"$candidate_enabled" "$candidate_role"
+	fi
 	current_role="$(role)"
 	device="$(getv xfrm_device ipsec-home)"
 	valid_device "$device" || device=invalid
-	printf 'enabled=%s\nrole=%s\nsecret=%s\n' "$enabled" "$current_role" \
-		"$(secret_configured && echo configured || echo missing)"
+	printf 'enabled=%s\nrole=%s\nsecret=%s\nsecret_pending=%s\n' "$enabled" "$current_role" \
+		"$(secret_configured && echo configured || echo missing)" \
+		"$(secret_pending && echo staged || echo none)"
 	printf 'ike_port=%s\n' "$(getv ike_port 1500)"
 	if [ "$current_role" = source ]; then
 		printf 'interface=%s\ninterface_present=%s\n' "$device" \
@@ -1560,10 +1873,17 @@ status_emit() {
 			"$(cat "/sys/class/net/$device/statistics/tx_bytes" 2>/dev/null || echo 0)"
 		printf 'fail_closed=%s\n' "$(source_ipv4_terminal_ready && source_ipv6_terminal_ready &&
 			echo active || echo missing)"
-		printf 'route=%s\npbr=%s\ndata_plane=%s\n' \
+		printf 'route=%s\npbr=%s\ndata_plane=%s\ntunnel_data_plane=%s\nclassifier=%s\nclient_forwarding=%s\n' \
 			"$(source_routes_ready && echo healthy || echo missing)" \
 			"$(source_pbr_ready && source_aux_rules_ready && echo healthy || echo missing)" \
-			"$(probe_recent_success && echo verified || echo unverified)"
+			"$(probe_recent_success && echo verified || echo unverified)" \
+			"$(probe_recent_success && echo verified || echo unverified)" \
+			"$(global_pbr_contract_ready && global_dns_contract_ready && policy_configuration_ready &&
+				source_pbr_ready && source_aux_rules_ready && echo healthy || echo missing)" \
+			"$(source_managed_config_ready && echo configured || echo missing)"
+		printf 'pbr_contract=%s\ndns_contract=%s\ncertificate_contract=not-applicable\n' \
+			"$(global_pbr_contract_ready && echo ready || echo missing)" \
+			"$(global_dns_contract_ready && echo ready || echo missing)"
 	else
 		device="$(getv exit_device ipsec-site-exit)"
 		valid_device "$device" || device=invalid
@@ -1574,10 +1894,16 @@ status_emit() {
 			"$(cat "/sys/class/net/$device/statistics/rx_bytes" 2>/dev/null || echo 0)" \
 			"$(cat "/sys/class/net/$device/statistics/tx_bytes" 2>/dev/null || echo 0)"
 		printf 'vip=%s\nfail_closed=not-applicable\n' "$(getv exit_pool 10.253.44.2)"
-		printf 'route=%s\npbr=%s\ndata_plane=%s\n' \
+		printf 'route=%s\npbr=%s\ndata_plane=%s\ntunnel_data_plane=%s\nclassifier=%s\nclient_forwarding=%s\n' \
 			"$(exit_route_ready && echo healthy || echo missing)" \
 			"$(exit_pbr_ready && echo healthy || echo missing)" \
-			"$(exit_traffic_recent && echo verified || echo unverified)"
+			"$(exit_traffic_recent && echo verified || echo unverified)" \
+			"$(exit_traffic_recent && echo verified || echo unverified)" \
+			"$(global_pbr_contract_ready && exit_pbr_ready && echo healthy || echo missing)" \
+			"$(exit_managed_config_ready && echo configured || echo missing)"
+		printf 'pbr_contract=%s\ndns_contract=not-applicable\ncertificate_contract=%s\n' \
+			"$(global_pbr_contract_ready && echo ready || echo missing)" \
+			"$(server_certificate_ready && echo ready || echo missing)"
 	fi
 	updated="$(sed -n 's/^updated=//p' "$state_file" 2>/dev/null | tail -n1)"
 	[ -z "$updated" ] || printf 'updated=%s\n' "$updated"
@@ -1604,6 +1930,7 @@ status_emit() {
 }
 
 monitor_loop() {
+	use_applied_config || die 'no applied configuration exists'
 	pid_lock_acquire "$monitor_lock_dir" || die 'monitor is already running'
 	monitor_wait_pid=
 	monitor_cleanup() {
@@ -1634,6 +1961,7 @@ monitor_loop() {
 	last_attempt=0
 	last_pbr_repair=0
 	last_aux_repair=0
+	last_config_repair=0
 	last_set_dump=0
 	while :; do
 		if [ "$(getv enabled 0)" != 1 ]; then
@@ -1658,6 +1986,11 @@ monitor_loop() {
 		fi
 		if [ "$(role)" = source ]; then
 			now="$(date +%s)"
+			if ! source_managed_config_ready &&
+			   time_due "$now" "$last_config_repair" 120; then
+				last_config_repair="$now"
+				try_with_lock source-config-reconcile repair_source_managed_config >/dev/null 2>&1 || true
+			fi
 			if time_due "$now" "$last_set_dump" 60; then
 				dump_pbr_sets >/dev/null 2>&1 || true
 				last_set_dump="$now"
@@ -1715,6 +2048,11 @@ monitor_loop() {
 			fi
 		else
 			now="$(date +%s)"
+			if ! exit_managed_config_ready &&
+			   time_due "$now" "$last_config_repair" 120; then
+				last_config_repair="$now"
+				try_with_lock exit-config-reconcile repair_exit_managed_config >/dev/null 2>&1 || true
+			fi
 			if ! exit_conn_loaded ||
 			   ! xfrm_ready "$(getv exit_device ipsec-site-exit)" "$(getv exit_if_id 45)" ||
 			   ! exit_route_ready; then
@@ -1789,13 +2127,16 @@ case "${1:-}" in
 	sources) sources_emit ;;
 	zones) zones_emit ;;
 	disable) with_lock disable disable_impl ;;
-	connect) with_lock connect connect_impl ;;
+	connect) use_applied_config || die 'no applied configuration exists'; with_lock connect connect_impl ;;
 	secret-set) with_lock secret-set consume_secret_input "${2:-}" ;;
-	policy-reload) with_lock policy-reload policy_reload_impl ;;
-	policy-check) policy_check ;;
+	secret-activate) with_lock secret-activate activate_secret_impl ;;
+	secret-rollback) with_lock secret-rollback rollback_secret_impl ;;
+	migrate-applied) with_lock migrate-applied migrate_applied_impl ;;
+	policy-reload) use_applied_config || exit 0; with_lock policy-reload policy_reload_impl ;;
+	policy-check) use_applied_config || exit 0; policy_check ;;
 	status) status_emit ;;
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;
 	render) if [ "$(role)" = exit ]; then render_exit; else render_source; fi ;;
-	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|policy-reload|policy-check|status|check|sources|zones|monitor|render}' ;;
+	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|secret-activate|secret-rollback|migrate-applied|policy-reload|policy-check|status|check|sources|zones|monitor|render}' ;;
 esac

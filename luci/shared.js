@@ -1,96 +1,60 @@
 'use strict';
 'require baseclass';
+'require fs';
 
-var STYLE_ID = 'ikev2-site-link-styles';
-var CSS = `
-.ikev2-page {
-	--ikev2-accent:#4f7dff; --ikev2-accent-2:#8b5cf6;
-	--ikev2-grad:linear-gradient(135deg,#4f7dff,#8b5cf6);
-	--ikev2-border:rgba(128,128,128,.22); --ikev2-border-strong:rgba(128,128,128,.34);
-	--ikev2-surface:rgba(128,128,128,.06); --ikev2-surface-2:rgba(128,128,128,.11);
-	--ikev2-muted:rgba(128,128,128,.85); --ikev2-good:#16a34a;
-	--ikev2-warn:#d97706; --ikev2-bad:#e11d48; --ikev2-info:#2f6fbe;
-	--ikev2-radius:16px; --ikev2-radius-sm:11px;
-	--ikev2-shadow:0 1px 2px rgba(0,0,0,.05),0 10px 30px -18px rgba(0,0,0,.45);
-	max-width:1220px;
-}
-.ikev2-page *{box-sizing:border-box}
-.ikev2-header{display:flex;align-items:flex-start;justify-content:space-between;gap:1.25rem;margin:0 0 1.35rem}
-.ikev2-header h2{margin:0 0 .35rem;font-size:clamp(1.45rem,2.6vw,1.85rem);font-weight:750;letter-spacing:-.015em}
-.ikev2-subtitle{margin:0;max-width:780px;color:var(--ikev2-muted);line-height:1.55}
-.ikev2-hero{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(15rem,.75fr);gap:1.25rem;margin:0 0 1rem;padding:1.35rem 1.45rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:radial-gradient(120% 140% at 0 0,color-mix(in srgb,var(--ikev2-accent) 18%,transparent),transparent 55%),radial-gradient(120% 160% at 100% 0,color-mix(in srgb,var(--ikev2-accent-2) 16%,transparent),transparent 55%),var(--ikev2-surface);box-shadow:var(--ikev2-shadow)}
-.ikev2-hero h3{margin:0 0 .4rem;font-size:1.3rem;font-weight:720}.ikev2-hero p{margin:0;color:var(--ikev2-muted);line-height:1.55}
-.ikev2-hero-side{display:flex;align-items:center;justify-content:flex-end;gap:.65rem;flex-wrap:wrap}
-.ikev2-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:1rem;margin:1rem 0}
-.ikev2-card{grid-column:span 3;min-width:0;position:relative;overflow:hidden;padding:1.05rem 1.1rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:var(--ikev2-surface);box-shadow:var(--ikev2-shadow)}
-.ikev2-card:before{content:"";position:absolute;inset:0 0 auto;height:3px;background:var(--ikev2-grad);opacity:.35}
-.ikev2-card-label{margin-bottom:.5rem;font-size:.72rem;font-weight:650;letter-spacing:.07em;text-transform:uppercase;color:var(--ikev2-muted)}
-.ikev2-card-value{min-height:1.8rem;font-size:clamp(1.25rem,2.2vw,1.55rem);font-weight:740;line-height:1.15;overflow-wrap:anywhere}
-.ikev2-card-detail{margin-top:.5rem;font-size:.84rem;line-height:1.5;color:var(--ikev2-muted);overflow-wrap:anywhere}
-.ikev2-pill{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .62rem;border:1px solid var(--ikev2-border);border-radius:999px;background:var(--ikev2-surface);font-size:.78rem;font-weight:650;white-space:nowrap}
-.ikev2-pill:before{content:"";width:.45rem;height:.45rem;border-radius:50%;background:currentColor}
-.ikev2-pill.good{color:var(--ikev2-good)}.ikev2-pill.warn{color:var(--ikev2-warn)}.ikev2-pill.bad{color:var(--ikev2-bad)}.ikev2-pill.info{color:var(--ikev2-info)}
-.ikev2-page .cbi-map{margin-top:1rem}
-.ikev2-page .cbi-section{border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:var(--ikev2-surface);box-shadow:var(--ikev2-shadow);padding:1rem 1.15rem;margin:0}
-.ikev2-page .cbi-section h3{font-size:1.05rem;margin:.1rem 0 .8rem}
-.ikev2-page .cbi-value{border-bottom-color:var(--ikev2-border);padding:.45rem 0}
-.ikev2-page .cbi-value:last-child{border-bottom:0}
-/* Descriptions are guidance, not body copy: keep them quiet and compact. */
-.ikev2-page .cbi-value-description{font-size:.78rem;line-height:1.45;color:var(--ikev2-muted);margin-top:.25rem}
-/* Two columns on wide screens: this page has few, short sections and should not
-   run the whole length of the viewport. Columns rather than a grid, because the
-   sections differ a lot in height — a grid row is as tall as its tallest cell
-   and leaves a hole beside it, while columns let the short sections stack. */
-@media(min-width:1000px){
-.ikev2-page .cbi-map{column-count:2;column-gap:1rem}
-.ikev2-page .cbi-map>.cbi-section{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;display:inline-block;width:100%;margin:0 0 1rem}
-}
-/* Buttons follow the shared look: rounded, gradient for the primary action. */
-.ikev2-page .cbi-button{border-radius:var(--ikev2-radius-sm);padding:.5rem 1rem;border:1px solid var(--ikev2-border);background:var(--ikev2-surface-2);font-weight:620;line-height:1.2;cursor:pointer;transition:transform .12s ease,box-shadow .14s ease,background .14s ease,border-color .14s ease,filter .14s ease}
-.ikev2-page .cbi-button:hover{background:color-mix(in srgb,currentColor 12%,transparent);border-color:var(--ikev2-border-strong);transform:translateY(-1px)}
-.ikev2-page .cbi-button:active{transform:translateY(0)}
-.ikev2-page .cbi-button-apply,.ikev2-page .cbi-button-positive,.ikev2-page .cbi-button-save{background-image:var(--ikev2-grad);border-color:transparent;color:#fff;box-shadow:0 8px 20px -10px var(--ikev2-accent)}
-.ikev2-page .cbi-button-apply:hover,.ikev2-page .cbi-button-positive:hover,.ikev2-page .cbi-button-save:hover{filter:brightness(1.06);background-image:var(--ikev2-grad)}
-.ikev2-page .cbi-button-action{border-color:color-mix(in srgb,var(--ikev2-accent) 45%,var(--ikev2-border));color:var(--ikev2-accent)}
-.ikev2-page button[disabled]{opacity:.55;cursor:wait;transform:none}
-/* Action bar: the secret field and the two operations that use it. */
-.ikev2-actions{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.75rem;margin-top:.35rem}
-.ikev2-actions .ikev2-field{display:flex;flex-direction:column;gap:.3rem;min-width:16rem;max-width:24rem;flex:1 1 16rem}
-.ikev2-actions label{font-size:.78rem;font-weight:650;color:var(--ikev2-muted)}
-.ikev2-actions input{height:2.15rem;padding:0 .6rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius-sm);background:var(--ikev2-surface);width:100%}
-.ikev2-policy-section{margin:0 0 1rem;padding:1.1rem 1.2rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:var(--ikev2-surface);box-shadow:var(--ikev2-shadow)}
-.ikev2-policy-section h3{margin:0 0 .35rem}.ikev2-policy-section>p{margin:.25rem 0 1rem;color:var(--ikev2-muted);line-height:1.5}
-.ikev2-chip-group{margin:.8rem 0}.ikev2-chip-group h4{margin:0 0 .45rem;font-size:.82rem;color:var(--ikev2-muted)}
-.ikev2-chips{display:flex;flex-wrap:wrap;gap:.45rem}.ikev2-chip{display:inline-flex;align-items:center;gap:.38rem;padding:.42rem .7rem;border:1px solid var(--ikev2-border);border-radius:999px;cursor:pointer;background:var(--ikev2-surface)}
-.ikev2-chip.selected{border-color:var(--ikev2-accent);background:color-mix(in srgb,var(--ikev2-accent) 13%,transparent)}.ikev2-chip.broad{border-style:dashed}.ikev2-chip input{margin:0}.ikev2-chip-mark{font-size:.68rem;font-weight:750;color:var(--ikev2-warn)}
-.ikev2-policy-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}.ikev2-policy-grid textarea,.ikev2-service-grid textarea{width:100%;min-height:13rem;font-family:monospace}.ikev2-service-grid{display:grid;grid-template-columns:minmax(11rem,.35fr) 1fr;gap:.75rem;align-items:start}.ikev2-service-grid label{font-weight:650;color:var(--ikev2-muted)}.ikev2-service-grid input,.ikev2-service-grid select,.ikev2-service-grid textarea{width:100%}.ikev2-status-box{white-space:pre-wrap;margin:.75rem 0 0;padding:.7rem;border-radius:var(--ikev2-radius-sm);background:rgba(128,128,128,.1)}
-@media(max-width:760px){.ikev2-policy-grid,.ikev2-service-grid{grid-template-columns:1fr}}
-@media(max-width:900px){.ikev2-card{grid-column:span 6}.ikev2-hero{grid-template-columns:1fr}.ikev2-hero-side{justify-content:flex-start}}
-@media(max-width:560px){.ikev2-header{display:block}.ikev2-card{grid-column:1/-1}.ikev2-grid{gap:.7rem}.ikev2-hero{padding:1.1rem}}
+var LANG_KEY = 'ikev2-site-link-language';
+var nativeTranslate = (typeof window !== 'undefined' && window._) ? window._ : null;
+var ru = {
+	'English':'English','Russian':'Русский','Language':'Язык','Overview':'Обзор',
+	'Policy Routing':'Маршрутизация по правилам','Policy active':'Политика активна','Policy empty':'Политика пуста','Policy error':'Ошибка политики',
+	'Prepared':'Подготовлено','Applied':'Применено',
+	'Select services and destinations that must use the monitored Site Link. Matching traffic remains fail-closed while the tunnel is unavailable.':'Выберите сервисы и назначения, которые должны использовать контролируемый Site Link. При недоступном туннеле совпавший трафик не уходит в WAN.',
+	'Services':'Сервисы','Prepared and user-created services stay in separate lists. Chips stage policy selection; the page Save button applies it. Service definitions are managed independently.':'Готовые и пользовательские сервисы хранятся отдельно. Выбор chips только подготавливает политику; применяет её кнопка «Сохранить» внизу страницы. Определения сервисов управляются независимо.',
+	'AI':'ИИ','Social & messaging':'Социальные сети и мессенджеры','Video & music':'Видео и музыка','Games & stores':'Игры и магазины','Infrastructure (broad — use with care)':'Инфраструктура (широкий охват — используйте осторожно)','Other':'Прочее','Custom services':'Пользовательские сервисы',
+	'Broad — may also route unrelated sites':'Широкий сервис — может направлять и посторонние сайты','Includes direct service IP networks':'Содержит прямые IP-сети сервиса',
+	'Manage services':'Управление сервисами','Add service':'Добавить сервис','Edit service':'Редактирование сервиса','New service':'Новый сервис','Service to edit':'Сервис для редактирования','Choose a service to inspect or edit.':'Выберите сервис для просмотра или редактирования.',
+	'Identifier':'Идентификатор','Stable internal name; it cannot be changed after creation.':'Постоянное внутреннее имя; после создания его нельзя изменить.','Service name':'Название сервиса','My service':'Мой сервис','Domain suffixes':'Суффиксы доменов','One domain suffix per line. Subdomains are included automatically.':'По одному доменному суффиксу в строке. Поддомены включаются автоматически.','IPv4 addresses and networks':'IPv4-адреса и сети','Optional; one IPv4 address or CIDR per line.':'Необязательно; по одному IPv4-адресу или CIDR в строке.',
+	'Save service':'Сохранить сервис','Restore prepared service':'Восстановить готовый сервис','Delete service':'Удалить сервис','Cancel':'Отмена','Custom domains':'Пользовательские домены','One plain domain per line. Custom entries are never overwritten by service updates.':'По одному обычному домену в строке. Пользовательские записи не перезаписываются при обновлении сервисов.','Custom IP addresses and networks':'Пользовательские IP-адреса и сети','One IPv4 address or CIDR network per line. A single address is stored as /32.':'По одному IPv4-адресу или CIDR в строке. Одиночный адрес сохраняется как /32.',
+	'Save':'Сохранить','Saving...':'Сохранение...','Saving service...':'Сохранение сервиса...','Loading service...':'Загрузка сервиса...','Restoring service...':'Восстановление сервиса...','Deleting service...':'Удаление сервиса...','Working...':'Выполнение...','Done':'Готово','Failed':'Ошибка','Still running':'Ещё выполняется','Rebuilding the PBR list…':'Пересборка списка PBR…','Queued...':'В очереди...','Preparing selected domain lists...':'Подготовка выбранных списков доменов...','Downloading selected service lists...':'Загрузка выбранных списков сервисов...','Building the combined policy list...':'Сборка общего списка маршрутизации...','Policy list unchanged; current routing is healthy.':'Список политики не изменился; текущая маршрутизация исправна.','Restarting policy routing...':'Перезапуск маршрутизации по правилам...','Action did not start':'Не удалось запустить операцию',
+	'Editor is not ready.':'Редактор не готов.','Invalid entry on line %d: %s':'Недопустимая запись в строке %d: %s','Invalid IPv4 address or network on line %d: %s':'Недопустимый IPv4-адрес или сеть в строке %d: %s','Unable to start the PBR rebuild':'Не удалось запустить пересборку PBR','Saved; rebuild continues in the background.':'Сохранено; пересборка продолжается в фоне.','%s domains active':'Активно доменов: %s','Rebuild failed: %s':'Сбой пересборки: %s','Unable to save: %s':'Не удалось сохранить: %s','unknown error':'неизвестная ошибка','The operation is still running in the background.':'Операция всё ещё выполняется в фоне.',
+	'Service identifier must contain 2–48 lowercase letters, digits or underscores.':'Идентификатор сервиса должен содержать от 2 до 48 строчных букв, цифр или знаков подчёркивания.','A service with this identifier already exists.':'Сервис с таким идентификатором уже существует.','Enter a service name up to 80 characters.':'Введите название сервиса длиной до 80 символов.','Add at least one domain or IPv4 network.':'Добавьте хотя бы один домен или IPv4-сеть.','Unable to start service update':'Не удалось запустить обновление сервиса','Service update failed':'Не удалось обновить сервис','Unable to refresh the service catalog':'Не удалось обновить каталог сервисов','Unable to load service':'Не удалось загрузить сервис',
+	'Custom service deleted and policy rebuilt.':'Пользовательский сервис удалён, политика пересобрана.','Prepared service restored and policy rebuilt.':'Готовый сервис восстановлен, политика пересобрана.','Service saved. Active policy was rebuilt when required.':'Сервис сохранён. Активная политика пересобрана при необходимости.','Reload the page to refresh the service catalog.':'Перезагрузите страницу для обновления каталога сервисов.','Discard unsaved service changes?':'Отменить несохранённые изменения сервиса?','Discard this local override and restore the prepared service?':'Удалить локальное переопределение и восстановить готовый сервис?','Delete this custom service?':'Удалить этот пользовательский сервис?','The service catalog is unavailable. Saved selections and local services are preserved.':'Каталог сервисов недоступен. Сохранённый выбор и локальные сервисы не изменены.',
+	'Policies are applied only on the source router. This router is configured as the exit; settings are read-only.':'Политики применяются только на исходном роутере. Этот роутер настроен как выходной; настройки доступны только для чтения.','Read-only on the exit router':'Только чтение на выходном роутере'
+};
+
+function defaultLanguage(){var value=null;try{value=window.localStorage&&window.localStorage.getItem(LANG_KEY);}catch(e){}if(value==='ru'||value==='en')return value;return String((document.documentElement&&document.documentElement.lang)||'').toLowerCase().indexOf('ru')===0?'ru':'en';}
+function translate(text){text=String(text==null?'':text);return defaultLanguage()==='ru'&&ru[text]?ru[text]:(nativeTranslate?nativeTranslate(text):text);}
+
+var STYLE_ID='ikev2-site-link-styles-v2';
+var CSS=`
+.ikev2-page{--ikev2-accent:#4f7dff;--ikev2-accent-2:#8b5cf6;--ikev2-grad:linear-gradient(135deg,#4f7dff,#8b5cf6);--ikev2-border:rgba(128,128,128,.22);--ikev2-border-strong:rgba(128,128,128,.34);--ikev2-surface:rgba(128,128,128,.06);--ikev2-surface-2:rgba(128,128,128,.11);--ikev2-muted:rgba(128,128,128,.85);--ikev2-good:#16a34a;--ikev2-warn:#d97706;--ikev2-bad:#e11d48;--ikev2-radius:16px;--ikev2-radius-sm:11px;--ikev2-shadow:0 1px 2px rgba(0,0,0,.05),0 10px 30px -18px rgba(0,0,0,.45);max-width:1220px}.ikev2-page *{box-sizing:border-box}
+.ikev2-header{display:flex;align-items:flex-start;justify-content:space-between;gap:1.25rem;margin:0 0 1.5rem}.ikev2-header h2{margin:0 0 .35rem;font-size:clamp(1.45rem,2.6vw,1.85rem);font-weight:750;letter-spacing:-.015em}.ikev2-subtitle{margin:0;max-width:780px;color:var(--ikev2-muted);line-height:1.55}.ikev2-header-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:.55rem}.ikev2-language{display:inline-flex;align-items:center;gap:.4rem;padding:.2rem .5rem;border:1px solid var(--ikev2-border);border-radius:999px;background:var(--ikev2-surface);font-size:.78rem;white-space:nowrap}.ikev2-language select{min-width:5.4rem;height:1.8rem;padding:0 .5rem;border-radius:999px!important}
+.ikev2-pill{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .62rem;border:1px solid var(--ikev2-border);border-radius:999px;background:var(--ikev2-surface);font-size:.78rem;font-weight:650;white-space:nowrap}.ikev2-pill:before{content:"";width:.45rem;height:.45rem;border-radius:50%;background:currentColor}.ikev2-pill.good{color:var(--ikev2-good)}.ikev2-pill.warn{color:var(--ikev2-warn)}.ikev2-pill.bad{color:var(--ikev2-bad)}.ikev2-pill.neutral{color:var(--ikev2-muted);background:var(--ikev2-surface-2)}
+.ikev2-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:1rem;margin:1rem 0}.ikev2-card{grid-column:span 3;min-width:0;position:relative;overflow:hidden;padding:1.05rem 1.1rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:var(--ikev2-surface);box-shadow:var(--ikev2-shadow)}.ikev2-card:before{content:"";position:absolute;inset:0 0 auto;height:3px;background:var(--ikev2-grad);opacity:.35}.ikev2-card-label{margin-bottom:.5rem;font-size:.72rem;font-weight:650;letter-spacing:.07em;text-transform:uppercase;color:var(--ikev2-muted)}.ikev2-card-value{min-height:1.8rem;font-size:clamp(1.25rem,2.2vw,1.55rem);font-weight:740;line-height:1.15;overflow-wrap:anywhere}.ikev2-card-detail{margin-top:.5rem;font-size:.84rem;line-height:1.5;color:var(--ikev2-muted);overflow-wrap:anywhere}
+.ikev2-section{margin:1.1rem 0;padding:1.25rem 1.3rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius);background:var(--ikev2-surface);box-shadow:var(--ikev2-shadow)}.ikev2-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:1rem}.ikev2-section-head>.ikev2-actions{flex:none;align-self:flex-start}.ikev2-section-head h3{margin:0 0 .3rem;font-weight:700;letter-spacing:-.01em}.ikev2-section-head p{margin:0;color:var(--ikev2-muted);line-height:1.5}.ikev2-actions{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem}.ikev2-actions.end{justify-content:flex-end}
+.ikev2-icon-button{display:inline-flex!important;align-items:center;justify-content:center;gap:.42rem;min-height:2.25rem;padding:.42rem .72rem!important;border-radius:.72rem!important;font-weight:650;white-space:nowrap}.ikev2-icon{width:1rem;height:1rem;flex:none;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.ikev2-form-grid{display:grid;grid-template-columns:minmax(11rem,1fr) minmax(18rem,2fr);gap:.9rem 1.4rem;align-items:center}.ikev2-field-label{font-weight:620}.ikev2-field-help{display:block;margin-top:.22rem;font-size:.8rem;font-weight:400;color:var(--ikev2-muted)}.ikev2-page input[type=text],.ikev2-page select,.ikev2-page textarea{border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius-sm);background:color-mix(in srgb,currentColor 3%,transparent);padding:.5rem .65rem;height:auto;min-height:2.25rem;line-height:1.35}.ikev2-form-grid input[type=text],.ikev2-form-grid textarea,.ikev2-form-grid select{width:100%;max-width:34rem}.ikev2-page input:focus,.ikev2-page select:focus,.ikev2-page textarea:focus{outline:none;border-color:var(--ikev2-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--ikev2-accent) 24%,transparent)}
+.ikev2-page .cbi-button{display:inline-flex;align-items:center;justify-content:center;min-height:2.35rem;border-radius:var(--ikev2-radius-sm);padding:.5rem 1rem;border:1px solid var(--ikev2-border);background:var(--ikev2-surface-2);font-weight:620;line-height:1.2;white-space:nowrap;cursor:pointer}.ikev2-page .cbi-button-apply,.ikev2-page .cbi-button-positive,.ikev2-page .cbi-button-save{background-image:var(--ikev2-grad);border-color:transparent;color:#fff;box-shadow:0 8px 20px -10px var(--ikev2-accent)}.ikev2-page .cbi-button-action{border-color:color-mix(in srgb,var(--ikev2-accent) 45%,var(--ikev2-border));color:var(--ikev2-accent)}.ikev2-page .cbi-button-negative{color:var(--ikev2-bad);border-color:color-mix(in srgb,var(--ikev2-bad) 40%,var(--ikev2-border))}.ikev2-page button[disabled],.ikev2-page input[disabled],.ikev2-page select[disabled],.ikev2-page textarea[disabled]{opacity:.55;cursor:not-allowed}
+.ikev2-result{display:inline-flex;align-items:center;gap:.35rem;max-width:26rem;font-size:.88rem;font-weight:560;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ikev2-result.busy{color:var(--ikev2-muted)}.ikev2-result.ok{color:var(--ikev2-good)}.ikev2-result.warn{color:var(--ikev2-warn)}.ikev2-result.err{color:var(--ikev2-bad)}
+.ikev2-chip-group{margin-bottom:1rem}.ikev2-chip-group:last-child{margin-bottom:0}.ikev2-chip-group h4{margin:0 0 .55rem;font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ikev2-muted)}.ikev2-chips{display:flex;flex-wrap:wrap;gap:.45rem}.ikev2-chip{display:inline-flex;align-items:center;gap:.35rem;padding:.32rem .7rem;border:1px solid var(--ikev2-border);border-radius:999px;background:var(--ikev2-surface-2);cursor:pointer;user-select:none;font-size:.85rem;font-weight:600;line-height:1.3}.ikev2-chip.selected{border-color:transparent;background-image:var(--ikev2-grad);color:#fff}.ikev2-chip.broad{border-color:color-mix(in srgb,var(--ikev2-warn) 45%,var(--ikev2-border))}.ikev2-chip.broad.selected{background-image:linear-gradient(135deg,#d97706,#b45309)}.ikev2-chip input{position:absolute;opacity:0;width:0;height:0}.ikev2-chip-mark{display:inline-flex;align-items:center;font-size:.7rem;opacity:.75}.ikev2-chip-mark .ikev2-icon{width:.82rem;height:.82rem}
+.ikev2-service-editor{margin-top:1rem;padding:1rem;border:1px solid var(--ikev2-border-strong);border-radius:var(--ikev2-radius);background:var(--ikev2-surface-2)}.ikev2-service-picker{margin-bottom:1rem}.ikev2-domain-editor-small{min-height:6rem!important}.ikev2-service-editor-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:1rem}.ikev2-service-editor-heading h3{margin:0}.ikev2-status-box{margin:.9rem 0 0;padding:.75rem .9rem;border:1px solid var(--ikev2-border);border-radius:var(--ikev2-radius-sm);background:var(--ikev2-surface-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;white-space:pre-wrap}.ikev2-domain-editor{width:100%;min-height:14rem!important;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.5}.ikev2-destination-editors{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin:1.1rem 0}.ikev2-destination-editors>.ikev2-section{min-width:0;margin:0}.ikev2-readonly-notice{margin:0 0 1.1rem}
+@media(prefers-reduced-motion:reduce){.ikev2-page *,.ikev2-page *:before,.ikev2-page *:after{transition:none!important}}@media(max-width:900px){.ikev2-card{grid-column:span 6}.ikev2-destination-editors{grid-template-columns:1fr}}@media(max-width:600px){.ikev2-page .cbi-button{white-space:normal;text-align:center}.ikev2-header,.ikev2-section-head{display:block}.ikev2-header>*,.ikev2-section-head>*{margin-bottom:.8rem}.ikev2-card{grid-column:1/-1}.ikev2-form-grid{grid-template-columns:1fr;gap:.4rem}.ikev2-form-grid>:nth-child(even){margin-bottom:.8rem}.ikev2-service-editor-heading{align-items:flex-start;flex-direction:column}}
 `;
 
-function styles() {
-	if (typeof document === 'undefined')
-		return '';
-	if (!document.getElementById(STYLE_ID))
-		document.head.appendChild(E('style', { 'id': STYLE_ID }, [ CSS ]));
-	return document.createDocumentFragment();
-}
+function styles(){if(typeof document==='undefined')return '';if(!document.getElementById(STYLE_ID))document.head.appendChild(E('style',{'id':STYLE_ID},[CSS]));return document.createDocumentFragment();}
+function pill(text,tone){return E('span',{'class':'ikev2-pill '+(tone||'neutral')},[text]);}
+function card(label,value,detail){return E('div',{'class':'ikev2-card'},[E('div',{'class':'ikev2-card-label'},[label]),E('div',{'class':'ikev2-card-value'},[value]),E('div',{'class':'ikev2-card-detail'},[detail||'—'])]);}
+function setPill(node,text,tone){if(node){node.className='ikev2-pill '+(tone||'neutral');node.textContent=text;}}
+function icon(name){var paths={settings:'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-3.5a7.8 7.8 0 0 0-.1-1l2-1.6-2-3.4-2.5 1a8 8 0 0 0-1.7-1L14.7 3h-4L10 6a8 8 0 0 0-1.7 1L5.8 6 3.8 9.4l2 1.6a7.8 7.8 0 0 0 0 2L3.8 14.6l2 3.4 2.5-1a8 8 0 0 0 1.7 1l.7 3h4l.7-3a8 8 0 0 0 1.7-1l2.5 1 2-3.4-2-1.6a7.8 7.8 0 0 0 .1-1Z',warning:'M12 3 2.5 20h19L12 3Zm0 6v5m0 3h.01',network:'M4 7h16M7 4v6m10-6v6M5 17h14M8 14v6m8-6v6'};return E('<svg class="ikev2-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="'+(paths[name]||paths.settings)+'"></path></svg>');}
+function languageSwitch(){var select=E('select',{'class':'cbi-input-select'},[E('option',{'value':'en','selected':defaultLanguage()==='en'?'':null},[translate('English')]),E('option',{'value':'ru','selected':defaultLanguage()==='ru'?'':null},[translate('Russian')])]);select.addEventListener('change',function(){if(window.localStorage)window.localStorage.setItem(LANG_KEY,select.value);window.location.reload();});return E('label',{'class':'ikev2-language'},[E('span',{},[translate('Language')]),select]);}
+function localizeNav(){if(typeof document==='undefined')return;var titles={'Overview':translate('Overview'),'Policy Routing':translate('Policy Routing')};var links=document.querySelectorAll('ul.tabs a, .cbi-tabmenu a, #mainmenu a, .main a[href*="ikev2-site-link"]');for(var i=0;i<links.length;i++){var title=(links[i].textContent||'').trim();if(titles[title]&&titles[title]!==title)links[i].textContent=titles[title];}}
+function header(title,subtitle,actions){var items=[languageSwitch()];if(actions)items=items.concat(Array.isArray(actions)?actions:[actions]);window.setTimeout(localizeNav,0);window.setTimeout(localizeNav,300);return E('div',{'class':'ikev2-header'},[E('div',{},[E('h2',{},[title]),subtitle?E('p',{'class':'ikev2-subtitle'},[subtitle]):'']),E('div',{'class':'ikev2-header-actions'},items)]);}
+function section(title,description,content,actions){return E('section',{'class':'ikev2-section'},[E('div',{'class':'ikev2-section-head'},[E('div',{},[E('h3',{},[title]),description?E('p',{},[description]):'']),actions||'']),content]);}
+function fieldLabel(title,help){return E('label',{'class':'ikev2-field-label'},[title,help?E('span',{'class':'ikev2-field-help'},[help]):'']);}
+function setBusy(button,busy,label){if(!button)return;var rewrites=String(button.tagName||'').toLowerCase()==='button';if(busy){if(button.dataset.busy!=='1'){button.dataset.idleDisabled=button.disabled?'1':'0';if(rewrites)button.dataset.idleHtml=button.innerHTML;}button.dataset.busy='1';button.disabled=true;button.setAttribute('aria-busy','true');if(rewrites)button.textContent=label||translate('Working...');}else{delete button.dataset.busy;button.disabled=button.dataset.idleDisabled==='1';delete button.dataset.idleDisabled;button.removeAttribute('aria-busy');if(rewrites&&button.dataset.idleHtml!=null)button.innerHTML=button.dataset.idleHtml;}}
+function inlineResult(){var node=E('span',{'class':'ikev2-result','style':'display:none'});function set(cls,text,full){node.className='ikev2-result '+cls;node.style.display='';node.textContent=text;node.title=full||text;}return{node:node,busy:function(msg){set('busy',msg||translate('Working...'));},ok:function(msg){set('ok',msg||translate('Done'));},warn:function(msg){set('warn',msg||translate('Still running'));},err:function(msg){set('err',msg||translate('Failed'));},clear:function(){node.style.display='none';node.textContent='';node.title='';}};}
+function execChecked(path,args,fallback){return fs.exec(path,args||[]).then(function(response){if(response&&response.code)throw new Error(((response.stderr||response.stdout||'').trim())||fallback||translate('Failed'));return response||{};});}
+function runAction(options){setBusy(options.button,true,options.busy||translate('Working...'));if(options.result)options.result.busy(options.busy||translate('Working...'));return Promise.resolve().then(options.run).then(function(value){if(options.onSuccess)return Promise.resolve(options.onSuccess(value)).then(function(){return value;});return value;}).catch(function(error){var message=(error&&error.message)||options.failure||translate('Failed');if(options.result)options.result.err(message);if(options.onError)options.onError(message,error);return null;}).finally(function(){setBusy(options.button,false);});}
+function inputToken(){var random=Math.floor(Math.random()*0x100000000).toString(36);return Date.now().toString(36)+'-'+random;}
 
-function pill(text, tone) {
-	return E('span', { 'class': 'ikev2-pill ' + (tone || 'neutral') }, [ text ]);
-}
-
-function card(label, value, detail) {
-	return E('div', { 'class': 'ikev2-card' }, [
-		E('div', { 'class': 'ikev2-card-label' }, [ label ]),
-		E('div', { 'class': 'ikev2-card-value' }, [ value ]),
-		E('div', { 'class': 'ikev2-card-detail' }, [ detail || '—' ])
-	]);
-}
-
-return baseclass.extend({
-	styles: styles,
-	pill: pill,
-	card: card
-});
+return baseclass.extend({t:translate,styles:styles,pill:pill,setPill:setPill,card:card,icon:icon,header:header,section:section,fieldLabel:fieldLabel,setBusy:setBusy,inlineResult:inlineResult,execChecked:execChecked,runAction:runAction,inputToken:inputToken,localizeNav:localizeNav});

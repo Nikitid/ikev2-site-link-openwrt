@@ -1,12 +1,11 @@
 #!/bin/sh
 
-[ "$(uci -q get ikev2-site-link.main.enabled)" = 1 ] || exit 0
-[ "$(uci -q get ikev2-site-link.main.role)" = source ] || exit 0
+[ "$(uci -q get ikev2-site-link.applied.enabled)" = 1 ] || exit 0
+[ "$(uci -q get ikev2-site-link.applied.role)" = source ] || exit 0
 
 case "${ACTION:-}" in
 	ifup | ifupdate)
-		[ "${INTERFACE:-}" = wan ] || exit 0
+		[ "${INTERFACE:-}" = "$(uci -q get ikev2-site-link.applied.source_wan || echo wan)" ] || exit 0
 		/usr/libexec/ikev2-site-link connect >/dev/null 2>&1 &
 		;;
 esac
-

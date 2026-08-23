@@ -15,6 +15,21 @@ case "${1:-}" in
 	get)
 		awk -F= -v key="${2:-}" '$1 == key { sub(/^[^=]*=/, ""); print; found=1 } END { exit !found }' "$state"
 		;;
+	set)
+		key="${2%%=*}"
+		value="${2#*=}"
+		awk -F= -v key="$key" -v value="$value" '
+			$1 == key { print key "=" value; found=1; next }
+			{ print }
+			END { if (!found) print key "=" value }
+		' "$state" >"$state.next"
+		mv "$state.next" "$state"
+		;;
+	delete)
+		awk -F= -v key="${2:-}" '$1 != key { print }' "$state" >"$state.next"
+		mv "$state.next" "$state"
+		;;
+	reorder | commit) ;;
 	*) exit 1 ;;
 esac
 EOF
@@ -76,12 +91,26 @@ case "$1" in
 esac
 EOF
 
+cat >"$tmp/bin/service-reload" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+	check | reload) printf '%s %s\n' "${0##*/}" "$1" >>"$SITE_LINK_TEST_SERVICE_LOG" ;;
+	*) exit 1 ;;
+esac
+EOF
+
 cat >"$tmp/bin/nft" <<'EOF'
 #!/bin/sh
 case "$*" in
 	'list chain inet fw4 pbr_prerouting')
 		[ -s "$SITE_LINK_TEST_NFT_STATE" ] || exit 1
 		echo 'meta mark set 0x10000 comment "IKEv2 Site Link: direct exit WAN"'
+		;;
+	'list chain inet fw4 forward_siteexit')
+		echo 'jump accept_to_wan comment "!fw4: Accept siteexit to wan forwarding"'
+		;;
+	'list chain inet fw4 dstnat_wan')
+		echo 'meta nfproto ipv4 udp dport 1500 counter redirect to :4500 comment "!fw4: IKEv2 Site Link: dedicated IKE port"'
 		;;
 	*) printf 'unexpected nft command: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -97,6 +126,49 @@ ikev2-site-link.main.exit_if_id=45
 ikev2-site-link.main.exit_pool=10.253.44.2
 ikev2-site-link.main.mtu=1360
 ikev2-site-link.main.monitor_interval=15
+ikev2-site-link.applied=state
+ikev2-site-link.applied.enabled=1
+ikev2-site-link.applied.role=exit
+ikev2-site-link.applied.remote_id=vpn.example.net
+ikev2-site-link.applied.peer_user=site-link
+ikev2-site-link.applied.ike_port=1500
+ikev2-site-link.applied.exit_interface=siteexit
+ikev2-site-link.applied.exit_device=ipsec-site-exit
+ikev2-site-link.applied.exit_if_id=45
+ikev2-site-link.applied.exit_pool=10.253.44.2
+ikev2-site-link.applied.exit_wan=wan
+ikev2-site-link.applied.exit_wan_zone=wan
+ikev2-site-link.applied.mtu=1360
+ikev2-site-link.applied.monitor_interval=15
+pbr.config.enabled=1
+pbr.config.strict_enforcement=1
+network.siteexit=interface
+network.siteexit.proto=none
+network.siteexit.device=ipsec-site-exit
+firewall.ikev2_site_link_exit=zone
+firewall.ikev2_site_link_exit.name=siteexit
+firewall.ikev2_site_link_exit.network=siteexit
+firewall.ikev2_site_link_exit.input=REJECT
+firewall.ikev2_site_link_exit.output=ACCEPT
+firewall.ikev2_site_link_exit.forward=REJECT
+firewall.ikev2_site_link_exit.mtu_fix=1
+firewall.ikev2_site_link_exit_wan=forwarding
+firewall.ikev2_site_link_exit_wan.src=siteexit
+firewall.ikev2_site_link_exit_wan.dest=wan
+firewall.ikev2_site_link_ike=redirect
+firewall.ikev2_site_link_ike.name=IKEv2 Site Link: dedicated IKE port
+firewall.ikev2_site_link_ike.src=wan
+firewall.ikev2_site_link_ike.proto=udp
+firewall.ikev2_site_link_ike.src_dport=1500
+firewall.ikev2_site_link_ike.dest_port=4500
+firewall.ikev2_site_link_ike.family=ipv4
+firewall.ikev2_site_link_ike.target=DNAT
+pbr.ikev2_site_link=policy
+pbr.ikev2_site_link.name=IKEv2 Site Link: direct exit WAN
+pbr.ikev2_site_link.interface=wan
+pbr.ikev2_site_link.src_addr=@ipsec-site-exit
+pbr.ikev2_site_link.proto=all
+pbr.ikev2_site_link.enabled=1
 EOF
 chmod 755 "$tmp/bin"/*
 : >"$tmp/ip.log"
@@ -104,6 +176,11 @@ chmod 755 "$tmp/bin"/*
 printf '%s\n' ready >"$tmp/nft.state"
 printf '%s\n' '10.253.44.2 dev wan' >"$tmp/exit.route"
 : >"$tmp/exit.sa"
+: >"$tmp/service.log"
+: >"$tmp/server-cert.pem"
+: >"$tmp/server-key.pem"
+printf '%s\n' fixture >"$tmp/server-cert.pem"
+printf '%s\n' fixture >"$tmp/server-key.pem"
 
 run_exit_monitor() {
 	PATH="$tmp/bin:/usr/bin:/bin" \
@@ -122,6 +199,12 @@ run_exit_monitor() {
 	IKEV2_ACTION_LOCK_STATUS="$tmp/action.status" \
 	SITE_LINK_PBR_INIT="$tmp/bin/pbr-init" \
 	SITE_LINK_NFT="$tmp/bin/nft" \
+	SITE_LINK_NETWORK_INIT="$tmp/bin/service-reload" \
+	SITE_LINK_FIREWALL_INIT="$tmp/bin/service-reload" \
+	SITE_LINK_FW4="$tmp/bin/service-reload" \
+	SITE_LINK_TEST_SERVICE_LOG="$tmp/service.log" \
+	SITE_LINK_SERVER_CERT="$tmp/server-cert.pem" \
+	SITE_LINK_SERVER_KEY="$tmp/server-key.pem" \
 	SITE_LINK_MONITOR_ONCE=1 \
 		sh "$root/runtime/ikev2-site-link.sh" monitor
 }
@@ -143,6 +226,12 @@ run_exit_monitor_continuous() {
 	IKEV2_ACTION_LOCK_STATUS="$tmp/action.status" \
 	SITE_LINK_PBR_INIT="$tmp/bin/pbr-init" \
 	SITE_LINK_NFT="$tmp/bin/nft" \
+	SITE_LINK_NETWORK_INIT="$tmp/bin/service-reload" \
+	SITE_LINK_FIREWALL_INIT="$tmp/bin/service-reload" \
+	SITE_LINK_FW4="$tmp/bin/service-reload" \
+	SITE_LINK_TEST_SERVICE_LOG="$tmp/service.log" \
+	SITE_LINK_SERVER_CERT="$tmp/server-cert.pem" \
+	SITE_LINK_SERVER_KEY="$tmp/server-key.pem" \
 		exec sh "$root/runtime/ikev2-site-link.sh" monitor
 }
 
@@ -153,6 +242,31 @@ grep -Fxq '10.253.44.2 dev ipsec-site-exit' "$tmp/exit.route"
 grep -Fxq 'state=idle' "$tmp/status"
 run_exit_monitor
 [ "$(grep -c '^route-replace$' "$tmp/ip.log")" = 1 ]
+
+# Editing candidate values alone must not retarget a live monitor iteration.
+sed 's/ikev2-site-link.main.exit_pool=10.253.44.2/ikev2-site-link.main.exit_pool=10.253.44.99/' \
+	"$tmp/exit.uci" >"$tmp/exit.uci.next"
+mv "$tmp/exit.uci.next" "$tmp/exit.uci"
+run_exit_monitor
+grep -Fxq '10.253.44.2 dev ipsec-site-exit' "$tmp/exit.route"
+if grep -Fq '10.253.44.99' "$tmp/ip.log"; then
+	echo 'monitor consumed candidate exit_pool instead of applied state' >&2
+	exit 1
+fi
+
+# Exact managed UCI invariants are reconciled, including the forwarding, DNAT
+# and concrete PBR fields; this is intentionally stronger than a chain comment.
+for key in firewall.ikev2_site_link_exit_wan.dest \
+	firewall.ikev2_site_link_ike.target pbr.ikev2_site_link.interface; do
+	awk -F= -v key="$key" '$1 != key { print }' "$tmp/exit.uci" >"$tmp/exit.uci.next"
+	mv "$tmp/exit.uci.next" "$tmp/exit.uci"
+done
+: >"$tmp/service.log"
+run_exit_monitor
+grep -Fxq 'firewall.ikev2_site_link_exit_wan.dest=wan' "$tmp/exit.uci"
+grep -Fxq 'firewall.ikev2_site_link_ike.target=DNAT' "$tmp/exit.uci"
+grep -Fxq 'pbr.ikev2_site_link.interface=wan' "$tmp/exit.uci"
+grep -q 'service-reload reload' "$tmp/service.log"
 
 # A repair must not erase the monitor's outer TERM/EXIT handlers. Otherwise a
 # later procd stop needs SIGKILL and leaves its PID lock behind.
@@ -197,6 +311,7 @@ grep -Fxq 'state=ok' "$tmp/status"
 
 # A missing PBR rule uses verified reload and never the destructive restart path.
 : >"$tmp/nft.state"
+: >"$tmp/pbr.log"
 run_exit_monitor
 [ "$(grep -c '^reload$' "$tmp/pbr.log")" = 1 ]
 if grep -Fq restart "$tmp/pbr.log"; then
@@ -222,9 +337,9 @@ cat >"$tmp/bin/uci-pbr" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = -q ] && shift
 case "${1:-}:${2:-}" in
-	get:ikev2-site-link.main.interface) echo sitehome ;;
-	get:ikev2-site-link.main.xfrm_device) echo ipsec-home ;;
-	get:ikev2-site-link.main.force_tcp) echo "${SITE_LINK_TEST_FORCE_TCP:-1}" ;;
+	get:ikev2-site-link.applied.interface) echo sitehome ;;
+	get:ikev2-site-link.applied.xfrm_device) echo ipsec-home ;;
+	get:ikev2-site-link.applied.force_tcp) echo "${SITE_LINK_TEST_FORCE_TCP:-1}" ;;
 	get:pbr.config.ipv6_enabled) echo "${SITE_LINK_TEST_IPV6:-0}" ;;
 	*) exit 1 ;;
 esac
@@ -409,7 +524,13 @@ ikev2-site-link.main.exit_device=ipsec-site-exit
 ikev2-site-link.main.exit_if_id=45
 ikev2-site-link.main.exit_pool=10.253.44.2
 ikev2-site-link.applied=state
+ikev2-site-link.applied.enabled=1
 ikev2-site-link.applied.role=source
+ikev2-site-link.applied.endpoint=new.example.net
+ikev2-site-link.applied.remote_id=new.example.net
+ikev2-site-link.applied.peer_user=site-link
+ikev2-site-link.applied.ike_port=1500
+ikev2-site-link.applied.source_devices=@br-lan
 ikev2-site-link.applied.interface=sitehome
 ikev2-site-link.applied.xfrm_device=ipsec-home
 ikev2-site-link.applied.if_id=44
@@ -529,6 +650,7 @@ SITE_LINK_SET_DUMP4="$tmp/set4.dump" \
 SITE_LINK_SET_DUMP6="$tmp/set6.dump" \
 SITE_LINK_PERSISTENT_SET_DUMP4="$tmp/persistent/set4.dump" \
 SITE_LINK_PERSISTENT_SET_DUMP6="$tmp/persistent/set6.dump" \
+SITE_LINK_PBR_RUNTIME_CONFIG="$tmp/disabled-pbr-runtime.conf" \
 SITE_LINK_LOCK="$tmp/disable-site.lock" \
 IKEV2_ACTION_LOCK="$tmp/disable-action.lock" \
 IKEV2_ACTION_LOCK_STATUS="$tmp/disable-action.status" \
@@ -587,7 +709,13 @@ ikev2-site-link.main.probe_interval=60
 ikev2-site-link.main.failure_threshold=3
 ikev2-site-link.main.reconnect_cooldown=30
 ikev2-site-link.applied=state
+ikev2-site-link.applied.enabled=1
 ikev2-site-link.applied.role=source
+ikev2-site-link.applied.endpoint=new.example.net
+ikev2-site-link.applied.remote_id=new.example.net
+ikev2-site-link.applied.peer_user=site-link
+ikev2-site-link.applied.ike_port=1500
+ikev2-site-link.applied.source_devices=@br-lan
 ikev2-site-link.applied.interface=sitehome
 ikev2-site-link.applied.xfrm_device=ipsec-home
 ikev2-site-link.applied.if_id=44
@@ -595,6 +723,46 @@ ikev2-site-link.applied.exit_interface=siteexit
 ikev2-site-link.applied.exit_device=ipsec-site-exit
 ikev2-site-link.applied.exit_if_id=45
 ikev2-site-link.applied.exit_pool=10.253.44.2
+ikev2-site-link.applied.exit_wan=wan
+ikev2-site-link.applied.exit_wan_zone=wan
+ikev2-site-link.applied.mtu=1360
+ikev2-site-link.applied.dpd=20
+ikev2-site-link.applied.monitor_interval=15
+ikev2-site-link.applied.probe_interval=60
+ikev2-site-link.applied.failure_threshold=3
+ikev2-site-link.applied.reconnect_cooldown=30
+ikev2-site-link.applied.force_tcp=1
+pbr.config.enabled=1
+pbr.config.strict_enforcement=1
+pbr.config.resolver_set=dnsmasq.nftset
+network.lan.device=br-lan
+network.sitehome=interface
+network.sitehome.proto=none
+network.sitehome.device=ipsec-home
+firewall.lan=zone
+firewall.lan.name=lan
+firewall.lan.network=lan
+firewall.ikev2_site_link=zone
+firewall.ikev2_site_link.name=sitehome
+firewall.ikev2_site_link.network=sitehome
+firewall.ikev2_site_link.input=REJECT
+firewall.ikev2_site_link.output=ACCEPT
+firewall.ikev2_site_link.forward=REJECT
+firewall.ikev2_site_link.mtu_fix=1
+firewall.ikev2_site_link.masq=1
+firewall.ikev2_site_link_src_1=forwarding
+firewall.ikev2_site_link_src_1.src=lan
+firewall.ikev2_site_link_src_1.dest=sitehome
+pbr.ikev2_site_link=policy
+pbr.ikev2_site_link.name=IKEv2 Site Link: selected services
+pbr.ikev2_site_link.interface=sitehome
+pbr.ikev2_site_link.src_addr=@br-lan
+pbr.ikev2_site_link.dest_addr=file://POLICY_DOMAINS file://POLICY_ADDRESSES
+pbr.ikev2_site_link.proto=all
+pbr.ikev2_site_link.enabled=1
+pbr.ikev2_site_link_include=include
+pbr.ikev2_site_link_include.path=PBR_HELPER
+pbr.ikev2_site_link_include.enabled=1
 EOF
 cat >"$tmp/bin/uci-apply" <<'EOF'
 #!/bin/sh
@@ -605,7 +773,16 @@ case "${1:-}" in
 	get)
 		awk -F= -v key="${2:-}" '$1 == key { sub(/^[^=]*=/, ""); print; found=1 } END { exit !found }' "$state"
 		;;
-	show) exit 1 ;;
+	show)
+		case "${2:-}" in
+			firewall)
+				echo 'firewall.lan=zone'
+				echo 'firewall.ikev2_site_link=zone'
+				echo 'firewall.ikev2_site_link_src_1=forwarding'
+				;;
+			*) exit 1 ;;
+		esac
+		;;
 	set | add_list | reorder | commit | delete | del_list)
 		printf 'uci %s %s\n' "$1" "${2:-}" >>"$SITE_LINK_TEST_EVENTS"
 		;;
@@ -661,6 +838,9 @@ case "$*" in
 		[ -s "$SITE_LINK_TEST_AUX_STATE" ] &&
 			echo 'maxseg comment "ikev2-site-link-mss-clamp"'
 		;;
+	'list chain inet fw4 forward_lan')
+		echo 'jump accept_to_sitehome comment "!fw4: Accept lan to sitehome forwarding"'
+		;;
 	*) exit 1 ;;
 esac
 EOF
@@ -708,6 +888,11 @@ printf '%s\n' fixture-secret >"$tmp/client.secret"
 printf '%s\n' '10444: from all oif ipsec-home lookup pbr_sitehome' >"$tmp/apply.rules"
 : >"$tmp/apply.aux"
 : >"$tmp/apply.events"
+printf '%s\n' youtube.com >"$tmp/policy.domains"
+printf '%s\n' 203.0.113.0/24 >"$tmp/policy.addresses"
+sed "s|POLICY_DOMAINS|$tmp/policy.domains|; s|POLICY_ADDRESSES|$tmp/policy.addresses|; s|PBR_HELPER|$tmp/bin/pbr-helper-apply|" \
+	"$tmp/apply.uci" >"$tmp/apply.uci.next"
+mv "$tmp/apply.uci.next" "$tmp/apply.uci"
 if PATH="$tmp/apply-bin:/usr/bin:/bin" \
 	SITE_LINK_TEST_UCI_STATE="$tmp/apply.uci" \
 	SITE_LINK_TEST_EVENTS="$tmp/apply.events" \
@@ -717,6 +902,9 @@ if PATH="$tmp/apply-bin:/usr/bin:/bin" \
 	SITE_LINK_CONN="$tmp/apply-swanctl/source.conf" \
 	SITE_LINK_CRED="$tmp/apply-swanctl/source-secret.conf" \
 	SITE_LINK_SECRET="$tmp/client.secret" \
+	SITE_LINK_PBR_RUNTIME_CONFIG="$tmp/apply-pbr-runtime.conf" \
+	SITE_LINK_DOMAINS="$tmp/policy.domains" \
+	SITE_LINK_ADDRESSES="$tmp/policy.addresses" \
 	SITE_LINK_PBR_HELPER="$tmp/bin/pbr-helper-apply" \
 	SITE_LINK_PBR_INIT="$tmp/bin/service-disable" \
 	SITE_LINK_NETWORK_INIT="$tmp/bin/service-disable" \
@@ -742,12 +930,18 @@ cmp -s "$tmp/old-source-secret.conf" "$tmp/apply-swanctl/source-secret.conf" || 
 	diff -u "$tmp/old-source-secret.conf" "$tmp/apply-swanctl/source-secret.conf" >&2 || true
 	exit 1
 }
+[ ! -e "$tmp/apply-pbr-runtime.conf" ] || {
+	echo 'failed candidate left its PBR runtime snapshot active' >&2
+	exit 1
+}
 [ "$(grep -c '^swanctl --terminate --ike site-link --timeout 5$' "$tmp/apply.events")" = 2 ]
 [ "$(grep -c '^swanctl --initiate --child site-link4 --timeout 20$' "$tmp/apply.events")" = 2 ]
 if grep -Eq '^service (enable|restart)$' "$tmp/apply.events"; then
 	echo 'rejected candidate restarted the service' >&2
 	exit 1
 fi
+grep -Fq 'uci set firewall.ikev2_site_link_src_1.src=lan' "$tmp/apply.events"
+grep -Fq 'uci set firewall.ikev2_site_link_src_1.dest=sitehome' "$tmp/apply.events"
 
 # Repeated end-to-end probe failures on the current SA trigger one bounded SA
 # replacement; merely reporting degraded would leave a black-holed tunnel up.
@@ -764,6 +958,9 @@ SITE_LINK_UCI_DIR="$tmp/apply-config" \
 SITE_LINK_CONN="$tmp/apply-swanctl/source.conf" \
 SITE_LINK_CRED="$tmp/apply-swanctl/source-secret.conf" \
 SITE_LINK_SECRET="$tmp/client.secret" \
+SITE_LINK_PBR_RUNTIME_CONFIG="$tmp/apply-pbr-runtime.conf" \
+SITE_LINK_DOMAINS="$tmp/policy.domains" \
+SITE_LINK_ADDRESSES="$tmp/policy.addresses" \
 SITE_LINK_PBR_HELPER="$tmp/bin/pbr-helper-apply" \
 SITE_LINK_PBR_INIT="$tmp/bin/service-disable" \
 SITE_LINK_NETWORK_INIT="$tmp/bin/service-disable" \

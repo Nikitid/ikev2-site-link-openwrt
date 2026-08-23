@@ -1,10 +1,21 @@
 #!/bin/sh
 
 site_link_pbr_main() {
-site_link_interface="$(uci -q get ikev2-site-link.main.interface || echo sitehome)"
-site_link_device="$(uci -q get ikev2-site-link.main.xfrm_device || echo ipsec-home)"
+site_link_runtime="${SITE_LINK_PBR_RUNTIME_CONFIG:-/var/run/ikev2-site-link-pbr.conf}"
+site_link_runtime_get() {
+	key="$1"
+	sed -n "s/^$key=//p" "$site_link_runtime" 2>/dev/null | tail -n1
+}
+site_link_interface="$(site_link_runtime_get interface)"
+[ -n "$site_link_interface" ] ||
+	site_link_interface="$(uci -q get ikev2-site-link.applied.interface || echo sitehome)"
+site_link_device="$(site_link_runtime_get device)"
+[ -n "$site_link_device" ] ||
+	site_link_device="$(uci -q get ikev2-site-link.applied.xfrm_device || echo ipsec-home)"
 site_link_table="pbr_$site_link_interface"
-site_link_force_tcp="$(uci -q get ikev2-site-link.main.force_tcp || echo 1)"
+site_link_force_tcp="$(site_link_runtime_get force_tcp)"
+[ -n "$site_link_force_tcp" ] ||
+	site_link_force_tcp="$(uci -q get ikev2-site-link.applied.force_tcp || echo 1)"
 site_link_set="pbr_${site_link_interface}_4_dst_ip_ikev2_site_link"
 site_link_comment='ikev2-site-link-force-youtube-tcp'
 site_link_mss_comment='ikev2-site-link-mss-clamp'
