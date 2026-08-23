@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-ikev2-site-link
-PKG_VERSION:=0.3.2
+PKG_VERSION:=0.3.3
 PKG_RELEASE:=
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=nikitid
@@ -31,6 +31,8 @@ define Package/luci-app-ikev2-site-link/conffiles
 /etc/ikev2-site-link/addresses.manual.txt
 /etc/ikev2-site-link/services.selected.txt
 /etc/ikev2-site-link/client.secret
+/etc/ikev2-site-link/client.secret.pending
+/etc/ikev2-site-link/client.secret.previous
 endef
 
 define Build/Compile

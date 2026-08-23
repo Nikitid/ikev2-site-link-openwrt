@@ -61,6 +61,7 @@ function statusPanel(status) {
 	var health = healthy ? _('Healthy') : (status.state === 'idle' ? _('Waiting') :
 		(disabled ? _('Disabled') : _('Needs attention')));
 	var detail = status.detail || _('Live state has not been reported yet.');
+	var applied = status.applied === '1' && status.configuration === 'applied';
 	return E('div', {}, [
 		E('div', { 'class': 'ikev2-hero' }, [
 			E('div', {}, [
@@ -68,6 +69,7 @@ function statusPanel(status) {
 				E('p', {}, [ detail ])
 			]),
 			E('div', { 'class': 'ikev2-hero-side' }, [
+				common.pill(applied ? _('Applied') : _('Prepared'), applied ? 'good' : 'warn'),
 				common.pill(connected ? _('Tunnel online') : _('Tunnel offline'), connected ? 'good' : 'bad'),
 				common.pill(health, healthy ? 'good' : ((status.state === 'idle' || disabled) ? 'info' : 'warn'))
 			])
@@ -75,12 +77,14 @@ function statusPanel(status) {
 		E('div', { 'class': 'ikev2-grid' }, [
 			common.card(_('Role'), role, status.interface || '—'),
 			common.card(_('Traffic'), '↓ ' + bytes(status.rx_bytes), _('Sent: ') + bytes(status.tx_bytes)),
-			common.card(_('Tunnel address'), status.vip || '—',
-				_('Data plane: ') + (status.data_plane || _('unverified'))),
-			common.card(_('Protection'), status.fail_closed === 'active' ? _('Fail-closed') :
+			common.card(_('Tunnel data plane'), status.tunnel_data_plane || _('unverified'),
+				_('Tunnel address: ') + (status.vip || '—')),
+			common.card(_('Routing path'), status.fail_closed === 'active' ? _('Fail-closed') :
 				(status.role === 'exit' ? _('WAN only') : _('Unavailable')),
-				_('Route: ') + (status.route || '—') + ' · ' + _('PBR: ') + (status.pbr || '—') +
-				' · UDP/' + (status.ike_port || '1500'))
+				_('Classifier: ') + (status.classifier || '—') + ' · ' +
+				_('Client forwarding: ') + (status.client_forwarding || '—') + ' · ' +
+				_('Dependencies: ') + 'PBR ' + (status.pbr_contract || '—') + ', DNS ' +
+				(status.dns_contract || '—') + ', cert ' + (status.certificate_contract || '—'))
 		])
 	]);
 }
@@ -172,7 +176,6 @@ return view.extend({
 		};
 
 		option = sourceRole.option(form.Value, 'mtu', _('Tunnel MTU'));
-		option.depends('role', 'source');
 		option.value('1360', '1360 — ' + _('recommended'));
 		option.value('1400', '1400');
 		option.value('1280', '1280 — ' + _('minimum'));
@@ -206,6 +209,7 @@ return view.extend({
 		option.description = _('Source HTTPS probe cadence. On the exit router, three times this interval is the maximum age of RX/TX progress. Use the same value on both routers.');
 
 		option = health.option(form.Value, 'failure_threshold', _('Reconnect threshold'));
+		option.depends('role', 'source');
 		option.value('3', '3 ' + _('checks') + ' — ' + _('recommended'));
 		option.value('5', '5 ' + _('checks'));
 		option.datatype = 'range(1,20)';
@@ -213,6 +217,7 @@ return view.extend({
 		option.description = _('Consecutive failed checks before the link is reconnected.');
 
 		option = health.option(form.Value, 'reconnect_cooldown', _('Reconnect cooldown'));
+		option.depends('role', 'source');
 		option.value('30', '30 ' + _('seconds') + ' — ' + _('recommended'));
 		option.value('60', '60 ' + _('seconds'));
 		option.value('300', '5 ' + _('minutes'));
@@ -241,6 +246,11 @@ return view.extend({
 		option.value('sitehome', 'sitehome — ' + _('default'));
 		option.description = _('UCI network and firewall zone this link creates on the source router.');
 
+		option = advanced.option(form.Value, 'source_wan', _('Source WAN network'));
+		option.depends('role', 'source');
+		option.placeholder = 'wan';
+		option.description = _('Network event that triggers an immediate reconnect after source WAN recovery. The monitor remains the fallback.');
+
 		option = advanced.option(form.Value, 'xfrm_device', _('Link device'));
 		option.depends('role', 'source');
 		option.value('ipsec-home', 'ipsec-home — ' + _('default'));
@@ -266,12 +276,13 @@ return view.extend({
 		option.description = _('42 and 43 are reserved by IKEv2 Manager. It must differ from the source identifier.');
 		option.validate = function(section_id, value) { return validIfId(value, 'if_id'); };
 
-		zoneOption('inbound_zone', _('Inbound VPN zone'), 'ikev2in',
-			_('Zone whose clients may also use the link. Skipped when the zone does not exist.'))
-			.depends('role', 'source');
+		option = advanced.option(form.Value, 'exit_wan', _('Exit WAN network/interface'));
+		option.depends('role', 'exit');
+		option.placeholder = 'wan';
+		option.description = _('PBR interface used to route Site Link traffic to the Internet. This is a network/interface name, not a firewall zone.');
 
-		zoneOption('exit_wan', _('Exit uplink zone'), 'wan',
-			_('The only zone the link may forward to on the exit router.'))
+		zoneOption('exit_wan_zone', _('Exit WAN firewall zone'), 'wan',
+			_('Firewall zone used by the Site Link forwarding and dedicated-port DNAT rules.'))
 			.depends('role', 'exit');
 
 		option = advanced.option(form.Value, 'dpd', _('Dead peer detection'));
@@ -303,7 +314,18 @@ return view.extend({
 				if (result.code)
 					throw new Error(result.stderr || _('Unable to update the peer secret.'));
 				input.value = '';
-				ui.addNotification(null, E('p', {}, [ _('Peer secret updated.') ]), 'info');
+				ui.addNotification(null, E('p', {}, [ status.secret === 'configured' ?
+					_('Replacement secret staged. Activate it on the exit router first, then on the source router.') :
+					_('Initial peer secret configured.') ]), 'info');
+			});
+		}
+
+		function secretAction(action, failure, success) {
+			return fs.exec(helper, [ action ]).then(function(result) {
+				if (result.code)
+					throw new Error(result.stderr || failure);
+				ui.addNotification(null, E('p', {}, [ success ]), 'info');
+				window.location.reload();
 			});
 		}
 
@@ -326,7 +348,7 @@ return view.extend({
 			return E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('Peer secret and actions') ]),
 				E('p', { 'class': 'cbi-value-description' }, [
-					_('The secret is shared with the exit router and is never stored in the configuration or shown here. Settings above are saved by "Apply and connect".')
+					_('The secret is write-only. Initial setup activates it immediately. Later changes are staged: activate the exit first without terminating its current SA, then activate the source, which verifies the new credential and rolls back on failure.')
 				]),
 				E('div', { 'class': 'ikev2-actions' }, [
 					E('div', { 'class': 'ikev2-field' }, [
@@ -336,7 +358,19 @@ return view.extend({
 					E('button', {
 						'class': 'cbi-button cbi-button-action',
 						'click': ui.createHandlerFn(self, function() { return updateSecret(input); })
-					}, [ _('Update secret') ]),
+					}, [ _('Stage replacement') ]),
+					E('button', {
+						'class': 'cbi-button cbi-button-action',
+						'click': ui.createHandlerFn(self, function() {
+							return secretAction('secret-activate', _('Unable to activate the staged secret.'), _('Staged secret activated.'));
+						})
+					}, [ _('Activate staged secret') ]),
+					E('button', {
+						'class': 'cbi-button cbi-button-reset',
+						'click': ui.createHandlerFn(self, function() {
+							return secretAction('secret-rollback', _('Unable to restore the previous secret.'), _('Previous secret restored.'));
+						})
+					}, [ _('Restore previous secret') ]),
 					E('button', {
 						'class': 'cbi-button cbi-button-apply',
 						'click': ui.createHandlerFn(self, applyAndConnect)

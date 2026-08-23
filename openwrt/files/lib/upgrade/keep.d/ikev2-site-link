@@ -8,3 +8,5 @@
 /etc/ikev2-site-link/services.d/
 /etc/ikev2-site-link/community-cache/
 /etc/ikev2-site-link/client.secret
+/etc/ikev2-site-link/client.secret.pending
+/etc/ikev2-site-link/client.secret.previous

@@ -43,6 +43,11 @@ if grep -Fq '"$pbr_init" reload >/dev/null || return 1' \
 fi
 grep -Fq '/var/run/ikev2-action.lock' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'routes-only' "$root/runtime/pbr.user.site-link"
+if grep -Fq 'ikev2-site-link.main.' "$root/runtime/pbr.user.site-link"; then
+	echo 'PBR include reads candidate configuration' >&2
+	exit 1
+fi
+grep -Fq 'ikev2-site-link.applied.interface' "$root/runtime/pbr.user.site-link"
 grep -Fq 'ip -6 route replace unreachable default metric 32767' \
 	"$root/runtime/pbr.user.site-link"
 grep -Fq 'SITE_LINK_SET_DUMP4' \
@@ -66,6 +71,8 @@ node -e 'new Function("window", "document", "L", "baseclass", require("fs").read
 node -e 'new Function("window", "document", "L", "baseclass", require("fs").readFileSync(process.argv[1], "utf8"))' \
 	"$root/luci/shared.js"
 
+"$root/scripts/test-policy-ui.sh"
+
 # LuCI require() rejects any module whose factory does not return a Class subclass.
 grep -q "^'require baseclass';" "$root/luci/shared.js"
 grep -q 'return baseclass.extend(' "$root/luci/shared.js"
@@ -83,7 +90,16 @@ grep -Fq '"/usr/libexec/ikev2-site-link sources"' "$root/luci/acl.json"
 grep -Fq '"/usr/libexec/ikev2-site-link zones"' "$root/luci/acl.json"
 grep -Fq 'zones) zones_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
-grep -Fq 'policy-reload) with_lock policy-reload policy_reload_impl ;;' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'policy-reload) use_applied_config || exit 0; with_lock policy-reload policy_reload_impl ;;' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'monitor) monitor_loop ;;' "$root/runtime/ikev2-site-link.sh"
+grep -Fq "use_applied_config || die 'no applied configuration exists'" "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'ikev2-site-link.applied.enabled' "$root/runtime/ikev2-site-link.init"
+grep -Fq 'ikev2-site-link.applied.role' "$root/runtime/90-ikev2-site-link"
+grep -Fq 'tunnel_data_plane=%s' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'classifier=%s' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'client_forwarding=%s' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'firewall.ikev2_site_link_ike.target' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'exit_wan_zone' "$root/openwrt/files/etc/config/ikev2-site-link"
 grep -Fq 'file://$domains_file file://$addresses_file' "$root/runtime/ikev2-site-link.sh"
 if sed -n '/^policy_configuration_ready()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
 	grep -Eq '" = *$'; then

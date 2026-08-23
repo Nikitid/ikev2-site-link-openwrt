@@ -55,6 +55,8 @@ SITE_LINK_UCI_DIR="$tmp/config" \
 SITE_LINK_CONN="$tmp/swanctl/site-link.conf" \
 SITE_LINK_CRED="$tmp/swanctl/site-link-secret.conf" \
 SITE_LINK_SECRET="$tmp/client.secret" \
+SITE_LINK_PENDING_SECRET="$tmp/client.secret.pending" \
+SITE_LINK_PREVIOUS_SECRET="$tmp/client.secret.previous" \
 SITE_LINK_SECRET_INPUT_DIR="$tmp" \
 SITE_LINK_LOCK="$tmp/site.lock" \
 IKEV2_ACTION_LOCK="$tmp/action.lock" \
@@ -62,6 +64,35 @@ IKEV2_ACTION_LOCK_STATUS="$tmp/action.status" \
 	sh "$root/runtime/ikev2-site-link.sh" secret-set "$token"
 cmp -s "$tmp/swanctl/site-link.before-secret" "$tmp/swanctl/site-link.conf"
 [ "$(cat "$tmp/client.secret")" = 'new fixture secret' ]
+
+# A later edit is a staged rotation. It must not replace the credential used by
+# the live peer until the explicit role-aware activation step.
+token=feedface12345678
+printf '%s' 'replacement fixture secret' >"$tmp/ikev2-site-link-secret-$token.in"
+PATH="$tmp/bin:$PATH" SITE_LINK_TEST_UCI_STATE="$tmp/uci.state" \
+SITE_LINK_UCI_DIR="$tmp/config" \
+SITE_LINK_SECRET="$tmp/client.secret" \
+SITE_LINK_PENDING_SECRET="$tmp/client.secret.pending" \
+SITE_LINK_PREVIOUS_SECRET="$tmp/client.secret.previous" \
+SITE_LINK_SECRET_INPUT_DIR="$tmp" \
+SITE_LINK_LOCK="$tmp/site.lock" \
+IKEV2_ACTION_LOCK="$tmp/action.lock" \
+IKEV2_ACTION_LOCK_STATUS="$tmp/action.status" \
+	sh "$root/runtime/ikev2-site-link.sh" secret-set "$token"
+[ "$(cat "$tmp/client.secret")" = 'new fixture secret' ]
+[ "$(cat "$tmp/client.secret.pending")" = 'replacement fixture secret' ]
+PATH="$tmp/bin:$PATH" SITE_LINK_TEST_UCI_STATE="$tmp/uci.state" \
+SITE_LINK_UCI_DIR="$tmp/config" \
+SITE_LINK_SECRET="$tmp/client.secret" \
+SITE_LINK_PENDING_SECRET="$tmp/client.secret.pending" \
+SITE_LINK_PREVIOUS_SECRET="$tmp/client.secret.previous" \
+SITE_LINK_LOCK="$tmp/site.lock" \
+IKEV2_ACTION_LOCK="$tmp/action.lock" \
+IKEV2_ACTION_LOCK_STATUS="$tmp/action.status" \
+	sh "$root/runtime/ikev2-site-link.sh" secret-activate
+[ "$(cat "$tmp/client.secret")" = 'replacement fixture secret' ]
+[ "$(cat "$tmp/client.secret.previous")" = 'new fixture secret' ]
+[ ! -e "$tmp/client.secret.pending" ]
 
 sed 's/\.if_id=44$/.if_id=46/' "$tmp/uci.state" >"$tmp/uci.next"
 mv "$tmp/uci.next" "$tmp/uci.state"

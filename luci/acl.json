@@ -34,6 +34,8 @@
 				"/usr/libexec/ikev2-site-link disable": [ "exec" ],
 				"/usr/libexec/ikev2-site-link connect": [ "exec" ],
 				"/usr/libexec/ikev2-site-link secret-set *": [ "exec" ],
+				"/usr/libexec/ikev2-site-link secret-activate": [ "exec" ],
+				"/usr/libexec/ikev2-site-link secret-rollback": [ "exec" ],
 				"/usr/libexec/ikev2-site-link-policy schedule *": [ "exec" ],
 				"/usr/libexec/ikev2-site-link-policy service-schedule *": [ "exec" ]
 			},
