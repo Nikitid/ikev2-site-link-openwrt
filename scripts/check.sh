@@ -40,6 +40,12 @@ if grep -Fq '(set -e;' "$root/runtime/ikev2-site-link.sh"; then
 	echo 'conditional transaction still relies on suppressed shell errexit semantics' >&2
 	exit 1
 fi
+grep -Fq 'date -r "$action_lock_dir" +%s' "$root/runtime/lib/actions.sh"
+grep -Fq 'date -r "$site_link_dump" +%s' "$root/runtime/pbr.user.site-link"
+if grep -Fq 'file_stamp()' "$root/runtime/ikev2-site-link.sh"; then
+	echo 'certificate cache still depends on file metadata' >&2
+	exit 1
+fi
 if grep -Fq '"$pbr_init" reload >/dev/null || return 1' \
 	"$root/runtime/ikev2-site-link.sh"; then
 	echo 'PBR reload still trusts the init-script exit code' >&2

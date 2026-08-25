@@ -137,11 +137,8 @@ atomic_install() {
 }
 
 file_mtime() {
-	stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
-}
-
-file_stamp() {
-	stat -c '%Y:%s' "$1" 2>/dev/null || stat -f '%m:%z' "$1" 2>/dev/null
+	date -r "$1" +%s 2>/dev/null ||
+		stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
 sha256_stream() {
@@ -1228,7 +1225,8 @@ server_certificate_validate_raw() {
 
 server_certificate_ready() {
 	local metadata signature cached status
-	metadata="$(file_stamp "$server_cert_file" && file_stamp "$server_key_file")" || return 1
+	metadata="$({ sha256_stream <"$server_cert_file"; sha256_stream <"$server_key_file"; } |
+		awk '{ print $1 }')" || return 1
 	signature="$({ printf '%s\n' "$metadata"; printf '%s\n' "$(getv remote_id)"; } |
 		sha256_stream | awk '{ print $1 }')"
 	[ -n "$signature" ] || return 1
