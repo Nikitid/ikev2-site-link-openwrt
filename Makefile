@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-ikev2-site-link
-PKG_VERSION:=0.3.5
+PKG_VERSION:=0.3.6
 PKG_RELEASE:=
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=nikitid
@@ -14,7 +14,16 @@ define Package/luci-app-ikev2-site-link
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=IKEv2 Site Link for OpenWrt
-  DEPENDS:=+luci-base +rpcd-mod-file +pbr +strongswan-swanctl +kmod-xfrm-interface +openssl-util +curl
+  DEPENDS:=+luci-base +rpcd-mod-file +pbr +ip-full +kmod-xfrm-interface \
+	+strongswan +strongswan-charon +strongswan-swanctl \
+	+strongswan-mod-aes +strongswan-mod-attr +strongswan-mod-constraints \
+	+strongswan-mod-eap-identity +strongswan-mod-eap-mschapv2 \
+	+strongswan-mod-gcm +strongswan-mod-gmp +strongswan-mod-hmac \
+	+strongswan-mod-kdf +strongswan-mod-kernel-netlink +strongswan-mod-md4 \
+	+strongswan-mod-openssl +strongswan-mod-pem +strongswan-mod-pkcs1 \
+	+strongswan-mod-pubkey +strongswan-mod-random +strongswan-mod-sha2 \
+	+strongswan-mod-socket-default +strongswan-mod-vici +strongswan-mod-x509 \
+	+openssl-util +curl
 endef
 
 define Package/luci-app-ikev2-site-link/description

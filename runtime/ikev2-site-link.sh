@@ -30,15 +30,24 @@ nft_bin="${SITE_LINK_NFT:-/usr/sbin/nft}"
 probe_state="${SITE_LINK_PROBE_STATE:-/var/run/ikev2-site-link-probe.status}"
 exit_traffic_state="${SITE_LINK_EXIT_TRAFFIC_STATE:-/var/run/ikev2-site-link-exit-traffic.status}"
 probe_url="${SITE_LINK_PROBE_URL:-https://www.youtube.com/generate_204}"
+probe_fallback_url="${SITE_LINK_PROBE_FALLBACK_URL:-https://cloudflare.com/cdn-cgi/trace}"
 probe_rule_priority="${SITE_LINK_PROBE_RULE_PRIORITY:-10444}"
 set_dump4="${SITE_LINK_SET_DUMP4:-/var/run/ikev2-site-link-set4.dump}"
 set_dump6="${SITE_LINK_SET_DUMP6:-/var/run/ikev2-site-link-set6.dump}"
 persistent_set_dump4="${SITE_LINK_PERSISTENT_SET_DUMP4:-/etc/ikev2-site-link/pbr-set4.dump}"
 persistent_set_dump6="${SITE_LINK_PERSISTENT_SET_DUMP6:-/etc/ikev2-site-link/pbr-set6.dump}"
+set_dump_max_age="${SITE_LINK_SET_DUMP_MAX_AGE:-3600}"
+guard_nft_table="${SITE_LINK_GUARD_NFT_TABLE:-ikev2_site_link_guard}"
+guard_route_table="${SITE_LINK_GUARD_ROUTE_TABLE:-10445}"
+guard_rule_priority="${SITE_LINK_GUARD_RULE_PRIORITY:-10445}"
+guard_mark="${SITE_LINK_GUARD_MARK:-0x01000000}"
+guard_mask="${SITE_LINK_GUARD_MASK:-0x01000000}"
+guard_config_file="${SITE_LINK_GUARD_CONFIG:-/var/run/ikev2-site-link-guard.nft}"
 rollback_root="${SITE_LINK_ROLLBACK_ROOT:-/var/run}"
 secret_input_dir="${SITE_LINK_SECRET_INPUT_DIR:-/var/run}"
 server_cert_file="${SITE_LINK_SERVER_CERT:-/etc/swanctl/x509/ikev2.pem}"
 server_key_file="${SITE_LINK_SERVER_KEY:-/etc/swanctl/private/ikev2.key}"
+server_cert_state="${SITE_LINK_CERT_STATE:-/var/run/ikev2-site-link-cert.status}"
 config_section=main
 action_lock_owned=0
 
@@ -97,6 +106,10 @@ valid_uint() {
 	case "$1" in '' | *[!0-9]*) return 1 ;; esac
 }
 
+valid_hex() {
+	printf '%s\n' "$1" | grep -Eq '^0x[0-9A-Fa-f]{1,8}$'
+}
+
 valid_ipv4() {
 	printf '%s\n' "$1" | awk -F. '
 		NF != 4 { exit 1 }
@@ -121,6 +134,22 @@ atomic_install() {
 	mode="$3"
 	chmod "$mode" "$source" || return 1
 	mv -f "$source" "$target"
+}
+
+file_mtime() {
+	stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+file_stamp() {
+	stat -c '%Y:%s' "$1" 2>/dev/null || stat -f '%m:%z' "$1" 2>/dev/null
+}
+
+sha256_stream() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum
+	else
+		shasum -a 256
+	fi
 }
 
 pid_lock_acquire() {
@@ -180,6 +209,7 @@ action_lock_acquire() {
 		printf 'updated=%s\n' "$(date +%s)"
 	} >"$action_lock_status.new.$$"
 	mv "$action_lock_status.new.$$" "$action_lock_status"
+	logger -t ikev2-action "begin owner=site-link action_id=$action pid=$$" 2>/dev/null || true
 }
 
 action_lock_release() {
@@ -188,6 +218,7 @@ action_lock_release() {
 	[ -z "$owner_pid" ] || [ "$owner_pid" = "$$" ] || return 0
 	rm -f "$action_lock_status"
 	rmdir "$action_lock_dir" 2>/dev/null || true
+	logger -t ikev2-action "end owner=site-link pid=$$" 2>/dev/null || true
 	action_lock_owned=0
 }
 
@@ -264,6 +295,20 @@ validate_config() {
 	[ "$probe_interval" -ge 30 ] && [ "$probe_interval" -le 3600 ] || die 'probe interval must be 30-3600 seconds'
 	[ "$ike_port" -ge 1024 ] && [ "$ike_port" -le 65535 ] || die 'external IKE port must be 1024-65535'
 	[ "$ike_port" != 4500 ] || die 'external IKE port 4500 conflicts with standard IKE NAT-T'
+	case "$probe_url:$probe_fallback_url" in
+		https://*:https://*) ;;
+		*) die 'data-plane probe URLs must use HTTPS' ;;
+	esac
+	valid_uci_name "$guard_nft_table" || die 'invalid guard nftables table name'
+	valid_uint "$guard_route_table" && [ "$guard_route_table" -ge 1 ] &&
+		[ "$guard_route_table" -le 4294967295 ] || die 'invalid guard route table'
+	valid_uint "$guard_rule_priority" && [ "$guard_rule_priority" -ge 1 ] &&
+		[ "$guard_rule_priority" -le 4294967295 ] || die 'invalid guard rule priority'
+	[ "$guard_rule_priority" != "$probe_rule_priority" ] ||
+		die 'guard and probe rule priorities must differ'
+	valid_hex "$guard_mark" && valid_hex "$guard_mask" || die 'invalid guard mark or mask'
+	[ $((guard_mark & guard_mask)) -eq $((guard_mark)) ] && [ $((guard_mark)) -ne 0 ] ||
+		die 'guard mark must be non-zero and contained by its mask'
 	interface="$(getv interface sitehome)"
 	exit_interface="$(getv exit_interface siteexit)"
 	device="$(getv xfrm_device ipsec-home)"
@@ -381,7 +426,7 @@ activate_secret_impl() {
 		rm -f "$pending_secret_file"
 		return 0
 	fi
-	if (set -e; load_active_secret; reset_source_sa; connect_source; source_control_ready); then
+	if load_active_secret && reset_source_sa && connect_source && source_control_ready; then
 		rm -f "$pending_secret_file"
 		if data_plane_ready; then probe_save 1; else probe_save 0; fi
 		return 0
@@ -644,16 +689,19 @@ pbr_reload_checked() {
 	# pbr/procd may return 1 even after completing a successful reload. Treat
 	# the init-script status only as a trigger result and decide from the live
 	# runtime: the service must be running and its fw4 chain must exist.
+	logger -t ikev2-pbr-action "begin owner=site-link action=reload pid=$$" 2>/dev/null || true
 	"$pbr_init" reload >/dev/null 2>&1 || true
 	tries=0
 	while [ "$tries" -lt 30 ]; do
 		if "$pbr_init" running >/dev/null 2>&1 &&
 		   "$nft_bin" list chain inet fw4 pbr_prerouting >/dev/null 2>&1; then
+			logger -t ikev2-pbr-action "end owner=site-link action=reload pid=$$" 2>/dev/null || true
 			return 0
 		fi
 		tries=$((tries + 1))
 		sleep 1
 	done
+	logger -t ikev2-pbr-action "error owner=site-link action=reload pid=$$" 2>/dev/null || true
 	return 1
 }
 
@@ -892,7 +940,8 @@ candidate_applied_match() {
 
 rollback_cleanup() {
 	directory="$1"
-	for file in network firewall pbr conn cred pbr-runtime conn.missing cred.missing pbr-runtime.missing; do
+	for file in network firewall pbr app-config conn cred pbr-runtime \
+		app-config.missing conn.missing cred.missing pbr-runtime.missing; do
 		rm -f "$directory/$file"
 	done
 	rmdir "$directory" 2>/dev/null || true
@@ -938,6 +987,10 @@ source_apply_transaction() {
 			die 'unable to create routing rollback snapshot'
 		}
 	done
+	rollback_file_backup "$uci_dir/$config_name" "$rollback_dir/app-config" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up applied configuration state'
+	}
 	rollback_file_backup "$conn_file" "$rollback_dir/conn" || {
 		rollback_cleanup "$rollback_dir"
 		die 'unable to back up source profile'
@@ -954,13 +1007,15 @@ source_apply_transaction() {
 	grep -Fq 'site-link {' "$rollback_dir/conn" 2>/dev/null && had_previous=1
 	# Do not validate a changed endpoint, identity or credential through an SA
 	# established from the previous profile.
-	if (set -e; render_source; ensure_xfrm; source_uci_apply; reset_source_sa; connect_source;
-		source_control_ready; data_plane_ready); then
+	if render_source && ensure_xfrm && source_uci_apply && guard_sync && reset_source_sa &&
+	   connect_source && guard_sync && source_control_ready && data_plane_ready &&
+	   persist_pbr_sets && record_applied_resources; then
 		rollback_cleanup "$rollback_dir"
 		return 0
 	fi
 	swanctl --terminate --ike site-link --timeout 5 >/dev/null 2>&1 || true
 	rollback_ok=1
+	rollback_file_restore "$rollback_dir/app-config" "$uci_dir/$config_name" || rollback_ok=0
 	for file in network firewall pbr; do
 		cp "$rollback_dir/$file" "$uci_dir/$file" || rollback_ok=0
 	done
@@ -975,7 +1030,9 @@ source_apply_transaction() {
 	device="$(getv xfrm_device ipsec-home)"
 	if [ "$had_previous" = 1 ]; then
 		connect_source >/dev/null 2>&1 || true
+		guard_sync >/dev/null 2>&1 || rollback_ok=0
 	else
+		guard_remove >/dev/null 2>&1 || rollback_ok=0
 		delete_probe_rule "$device" "$(getv interface sitehome)" >/dev/null 2>&1 || true
 		ip -4 addr flush dev "$device" scope global 2>/dev/null || true
 		delete_xfrm_candidate "$device" "$(getv if_id 44)" >/dev/null 2>&1 || true
@@ -997,6 +1054,10 @@ exit_apply_transaction() {
 			die 'unable to create routing rollback snapshot'
 		}
 	done
+	rollback_file_backup "$uci_dir/$config_name" "$rollback_dir/app-config" || {
+		rollback_cleanup "$rollback_dir"
+		die 'unable to back up applied configuration state'
+	}
 	rollback_file_backup "$exit_conn_file" "$rollback_dir/conn" || {
 		rollback_cleanup "$rollback_dir"
 		die 'unable to back up exit profile'
@@ -1007,15 +1068,17 @@ exit_apply_transaction() {
 	}
 	had_previous=0
 	grep -Fq 'site-link-in {' "$rollback_dir/conn" 2>/dev/null && had_previous=1
-	if (set -e; render_exit; ensure_xfrm "$(getv exit_device ipsec-site-exit)" "$(getv exit_if_id 45)";
-		exit_uci_apply; reset_exit_sa; swanctl --load-conns >/dev/null 2>&1;
-		swanctl --load-pools >/dev/null 2>&1; swanctl --load-creds >/dev/null 2>&1;
-		exit_control_ready); then
+	if render_exit &&
+	   ensure_xfrm "$(getv exit_device ipsec-site-exit)" "$(getv exit_if_id 45)" &&
+	   exit_uci_apply && reset_exit_sa && swanctl --load-conns >/dev/null 2>&1 &&
+	   swanctl --load-pools >/dev/null 2>&1 && swanctl --load-creds >/dev/null 2>&1 &&
+	   exit_control_ready && record_applied_resources; then
 		rollback_cleanup "$rollback_dir"
 		return 0
 	fi
 	swanctl --terminate --ike site-link-in --timeout 5 >/dev/null 2>&1 || true
 	rollback_ok=1
+	rollback_file_restore "$rollback_dir/app-config" "$uci_dir/$config_name" || rollback_ok=0
 	for file in network firewall pbr; do
 		cp "$rollback_dir/$file" "$uci_dir/$file" || rollback_ok=0
 	done
@@ -1107,20 +1170,81 @@ policy_configuration_ready() {
 
 global_pbr_contract_ready() {
 	[ "$(uci -q get pbr.config.enabled 2>/dev/null || echo 0)" = 1 ] &&
-	[ "$(uci -q get pbr.config.strict_enforcement 2>/dev/null || echo 0)" = 1 ]
+	[ "$(uci -q get pbr.config.strict_enforcement 2>/dev/null || echo 0)" = 1 ] &&
+	{ [ "$(role)" != source ] ||
+	  [ "$(uci -q get pbr.config.ipv6_enabled 2>/dev/null || echo 0)" = 1 ]; }
 }
 
 global_dns_contract_ready() {
-	[ "$(uci -q get pbr.config.resolver_set 2>/dev/null || true)" = dnsmasq.nftset ]
+	[ "$(uci -q get pbr.config.resolver_set 2>/dev/null || true)" = dnsmasq.nftset ] &&
+		command -v dnsmasq >/dev/null 2>&1 &&
+		dnsmasq -v 2>&1 | tr ' ' '\n' | grep -qx nftset
+}
+
+server_certificate_validate_raw() {
+	local cert_public key_public identity result
+	[ -s "$server_cert_file" ] && [ -s "$server_key_file" ] || {
+		printf '%s\n' 'ikev2-site-link: exit certificate or private key is missing' >&2
+		return 1
+	}
+	command -v openssl >/dev/null 2>&1 || {
+		printf '%s\n' 'ikev2-site-link: openssl is unavailable for exit certificate validation' >&2
+		return 1
+	}
+	openssl x509 -in "$server_cert_file" -noout -checkend 300 >/dev/null 2>&1 || {
+		printf '%s\n' 'ikev2-site-link: exit certificate is invalid or expires within five minutes' >&2
+		return 1
+	}
+	openssl pkey -in "$server_key_file" -noout -check >/dev/null 2>&1 || {
+		printf '%s\n' 'ikev2-site-link: exit private key is invalid' >&2
+		return 1
+	}
+	identity="$(getv remote_id)"
+	[ -n "$identity" ] || return 1
+	openssl x509 -in "$server_cert_file" -noout -checkhost "$identity" >/dev/null 2>&1 || {
+		printf 'ikev2-site-link: exit certificate does not match %s\n' "$identity" >&2
+		return 1
+	}
+	cert_public="${TMPDIR:-/tmp}/ikev2-site-link-cert-public.$$"
+	key_public="${TMPDIR:-/tmp}/ikev2-site-link-key-public.$$"
+	if ! openssl x509 -in "$server_cert_file" -pubkey -noout 2>/dev/null |
+		openssl pkey -pubin -outform DER >"$cert_public" 2>/dev/null ||
+	   ! openssl pkey -in "$server_key_file" -pubout -outform DER \
+		>"$key_public" 2>/dev/null; then
+		rm -f "$cert_public" "$key_public"
+		printf '%s\n' 'ikev2-site-link: unable to compare exit certificate and private key' >&2
+		return 1
+	fi
+	cmp -s "$cert_public" "$key_public"
+	result=$?
+	rm -f "$cert_public" "$key_public"
+	[ "$result" = 0 ] || printf '%s\n' 'ikev2-site-link: exit certificate and private key do not match' >&2
+	return "$result"
 }
 
 server_certificate_ready() {
-	[ -s "$server_cert_file" ] && [ -s "$server_key_file" ]
+	local metadata signature cached status
+	metadata="$(file_stamp "$server_cert_file" && file_stamp "$server_key_file")" || return 1
+	signature="$({ printf '%s\n' "$metadata"; printf '%s\n' "$(getv remote_id)"; } |
+		sha256_stream | awk '{ print $1 }')"
+	[ -n "$signature" ] || return 1
+	cached="$(sed -n "s/^$signature=//p" "$server_cert_state" 2>/dev/null | tail -n1)"
+	case "$cached" in 1) return 0 ;; 0) return 1 ;; esac
+	status=0
+	server_certificate_validate_raw || status=1
+	if { printf '%s=%s\n' "$signature" "$([ "$status" = 0 ] && echo 1 || echo 0)" \
+		>"$server_cert_state.new" && chmod 600 "$server_cert_state.new" &&
+		mv "$server_cert_state.new" "$server_cert_state"; } 2>/dev/null; then
+		:
+	else
+		rm -f "$server_cert_state.new" 2>/dev/null || true
+	fi
+	return "$status"
 }
 
 validate_dependency_contract() {
 	global_pbr_contract_ready ||
-		die 'global PBR contract requires enabled=1 and strict_enforcement=1'
+		die 'global PBR contract requires enabled=1, strict_enforcement=1 and IPv6 fail-closed processing on the source'
 	if [ "$(role)" = source ]; then
 		global_dns_contract_ready ||
 			die 'source DNS classifier contract requires pbr resolver_set=dnsmasq.nftset'
@@ -1242,13 +1366,15 @@ policy_reload_impl() {
 	pbr_reload_checked || return 1
 	reconcile_source_routes || return 1
 	repair_source_aux || return 1
-	source_pbr_ready && policy_configuration_ready
+	guard_sync || return 1
+	persist_pbr_sets || return 1
+	source_pbr_ready && policy_configuration_ready && guard_runtime_ready
 }
 
 policy_check() {
 	[ "$(getv enabled 0)" = 1 ] && [ "$(role)" = source ] || return 0
 	policy_configuration_ready && source_pbr_ready && source_routes_ready &&
-		source_aux_rules_ready
+		source_aux_rules_ready && guard_runtime_ready
 }
 
 source_aux_rules_ready() {
@@ -1369,14 +1495,6 @@ reconcile_source_routes() {
 	else
 		source_fail_closed_ready && ! source_live_route_ready
 	fi
-}
-
-repair_source_pbr() {
-	render_pbr_runtime_config || return 1
-	pbr_reload_checked || return 1
-	ensure_probe_rule || return 1
-	repair_source_aux || return 1
-	source_pbr_ready
 }
 
 exit_sa_ready() {
@@ -1519,10 +1637,14 @@ exit_pbr_ready() {
 }
 
 data_plane_ready() {
+	local device url
 	device="$(getv xfrm_device ipsec-home)"
 	command -v curl >/dev/null 2>&1 || return 1
-	curl -4fsS --interface "$device" --connect-timeout 3 --max-time 6 \
-		-o /dev/null "$probe_url"
+	for url in "$probe_url" "$probe_fallback_url"; do
+		curl -4fsS --interface "$device" --connect-timeout 3 --max-time 6 \
+			-o /dev/null "$url" && return 0
+	done
+	return 1
 }
 
 probe_due() {
@@ -1560,17 +1682,6 @@ probe_save() {
 	mv "$probe_state.new" "$probe_state"
 }
 
-probe_failure_count() {
-	probe_sa_id="$(sed -n 's/^sa_id=//p' "$probe_state" 2>/dev/null | tail -n1)"
-	[ -n "$probe_sa_id" ] && [ "$probe_sa_id" = "$(source_sa_id)" ] || {
-		printf '%s\n' 0
-		return
-	}
-	value="$(sed -n 's/^failures=//p' "$probe_state" 2>/dev/null | tail -n1)"
-	case "$value" in '' | *[!0-9]*) value=0 ;; esac
-	printf '%s\n' "$value"
-}
-
 probe_recent_success() {
 	[ "$(sed -n 's/^success=//p' "$probe_state" 2>/dev/null | tail -n1)" = 1 ] || return 1
 	probe_sa_id="$(sed -n 's/^sa_id=//p' "$probe_state" 2>/dev/null | tail -n1)"
@@ -1605,17 +1716,269 @@ dump_pbr_sets() {
 
 persist_pbr_sets() {
 	dump_pbr_sets
-	mkdir -p "${persistent_set_dump4%/*}" "${persistent_set_dump6%/*}"
+	mkdir -p "${persistent_set_dump4%/*}" "${persistent_set_dump6%/*}" || return 1
 	if [ -s "$set_dump4" ]; then
-		cp "$set_dump4" "$persistent_set_dump4.new"
-		chmod 600 "$persistent_set_dump4.new"
-		mv "$persistent_set_dump4.new" "$persistent_set_dump4"
+		cp "$set_dump4" "$persistent_set_dump4.new" || return 1
+		chmod 600 "$persistent_set_dump4.new" || return 1
+		mv "$persistent_set_dump4.new" "$persistent_set_dump4" || return 1
 	fi
 	if [ -s "$set_dump6" ]; then
-		cp "$set_dump6" "$persistent_set_dump6.new"
-		chmod 600 "$persistent_set_dump6.new"
-		mv "$persistent_set_dump6.new" "$persistent_set_dump6"
+		cp "$set_dump6" "$persistent_set_dump6.new" || return 1
+		chmod 600 "$persistent_set_dump6.new" || return 1
+		mv "$persistent_set_dump6.new" "$persistent_set_dump6" || return 1
 	fi
+}
+
+guard_pbr_mask() {
+	local mask
+	mask="$(uci -q get pbr.config.fw_mask 2>/dev/null || true)"
+	valid_hex "$mask" || mask=0x00ff0000
+	printf '%s\n' "$mask"
+}
+
+guard_rule_match() {
+	local pbr_mask combined_mask
+	pbr_mask="$(guard_pbr_mask)"
+	[ $((guard_mark & pbr_mask)) -eq 0 ] || return 1
+	combined_mask=$((guard_mask | pbr_mask))
+	printf '0x%x/0x%x\n' "$((guard_mark))" "$combined_mask"
+}
+
+guard_rule_ready() {
+	local family mark_canonical
+	family="$1"
+	mark_canonical="$(guard_rule_match)" || return 1
+	ip "-$family" rule show 2>/dev/null |
+		awk -v priority="$guard_rule_priority:" -v mark="$mark_canonical" \
+			-v table="$guard_route_table" '
+			$1 == priority {
+				total++
+				for (i = 1; i <= NF; i++) {
+					if ($i == "fwmark" && $(i + 1) == mark) marked=1
+					if (($i == "lookup" || $i == "table") && $(i + 1) == table) routed=1
+				}
+				if (marked && routed) correct++
+			}
+			END { exit !(total == 1 && correct == 1) }
+		'
+}
+
+guard_route_ready() {
+	local device
+	device="$(getv xfrm_device ipsec-home)"
+	ip -4 route show table "$guard_route_table" 2>/dev/null |
+		awk -v device="$device" -v live="$(source_sa_ready && echo 1 || echo 0)" '
+			$1 == "unreachable" && $2 == "default" { terminal++ }
+			$1 == "default" { defaults++; if ($2 == "dev" && $3 == device) active++ }
+			END {
+				if (terminal != 1) exit 1
+				if (live == 1) exit !(defaults == 1 && active == 1)
+				exit !(defaults == 0 && active == 0)
+			}
+		' || return 1
+	ip -6 route show table "$guard_route_table" 2>/dev/null |
+		awk '$1 == "unreachable" && $2 == "default" { terminal++ }
+			 $1 == "default" { active++ }
+			 END { exit !(terminal == 1 && active == 0) }'
+}
+
+guard_classifier_ready() {
+	"$nft_bin" list table inet "$guard_nft_table" 2>/dev/null |
+		grep -Fq 'comment "ikev2-site-link:classifier"'
+}
+
+guard_runtime_ready() {
+	guard_classifier_ready && guard_rule_ready 4 && guard_rule_ready 6 && guard_route_ready
+}
+
+guard_ensure_rule() {
+	local family rule_match
+	family="$1"
+	guard_rule_ready "$family" && return 0
+	if ip "-$family" rule show 2>/dev/null |
+		awk -v priority="$guard_rule_priority:" '$1 == priority { found=1 } END { exit !found }'; then
+		return 1
+	fi
+	rule_match="$(guard_rule_match)" || return 1
+	ip "-$family" rule add priority "$guard_rule_priority" \
+		fwmark "$rule_match" lookup "$guard_route_table"
+}
+
+guard_resources_available() {
+	local family mark_canonical routes
+	mark_canonical="$(guard_rule_match)" || return 1
+	for family in 4 6; do
+		ip "-$family" rule show 2>/dev/null |
+			awk -v priority="$guard_rule_priority:" -v mark="$mark_canonical" \
+				-v table="$guard_route_table" '
+				{
+					uses_table=0; uses_mark=0
+					for (i = 1; i <= NF; i++) {
+						if (($i == "lookup" || $i == "table") && $(i + 1) == table) uses_table=1
+						if ($i == "fwmark" && $(i + 1) == mark) uses_mark=1
+					}
+					if ((uses_table || uses_mark) && $1 != priority) conflict=1
+				}
+				END { exit conflict }
+			' || return 1
+		routes="$(ip "-$family" route show table "$guard_route_table" 2>/dev/null || true)"
+		[ -z "$routes" ] || [ -s "$guard_config_file" ] || guard_classifier_ready || return 1
+	done
+}
+
+guard_reconcile_routes() {
+	local device
+	guard_resources_available || return 1
+	device="$(getv xfrm_device ipsec-home)"
+	ip -4 route replace unreachable default metric 32767 table "$guard_route_table" || return 1
+	if source_sa_ready; then
+		ip -4 route replace default dev "$device" metric 10 table "$guard_route_table" || return 1
+	else
+		ip -4 route del default dev "$device" metric 10 table "$guard_route_table" 2>/dev/null || true
+	fi
+	ip -6 route replace unreachable default metric 32767 table "$guard_route_table" || return 1
+	guard_ensure_rule 4 || return 1
+	guard_ensure_rule 6 || return 1
+	guard_route_ready
+}
+
+guard_set_elements() {
+	local file
+	file="$1"
+	[ -s "$file" ] || return 0
+	awk 'BEGIN { first=1 } NF { if (!first) printf ", "; printf "%s", $0; first=0 }' "$file"
+}
+
+guard_prepare_dump() {
+	local family output current persistent pattern input saved now max_age
+	family="$1"
+	output="$2"
+	if [ "$family" = 4 ]; then
+		current="$set_dump4"
+		persistent="$persistent_set_dump4"
+		pattern='^[0-9./-]+$'
+	else
+		current="$set_dump6"
+		persistent="$persistent_set_dump6"
+		pattern='^[0-9A-Fa-f:./-]+$'
+	fi
+	input="$current"
+	if [ ! -s "$input" ]; then
+		input="$persistent"
+		max_age="$set_dump_max_age"
+		case "$max_age" in '' | *[!0-9]*) max_age=3600 ;; esac
+		saved="$(file_mtime "$input" 2>/dev/null || echo 0)"
+		now="$(date +%s)"
+		case "$saved" in '' | *[!0-9]*) input='' ;; esac
+		if [ -n "$input" ] && { [ "$now" -lt "$saved" ] ||
+		   [ $((now - saved)) -gt "$max_age" ]; }; then
+			input=''
+		fi
+	fi
+	if [ -s "$input" ]; then
+		grep -E "$pattern" "$input" | sort -u >"$output" || true
+	else
+		: >"$output"
+	fi
+}
+
+guard_write_set() {
+	local name type file
+	name="$1"
+	type="$2"
+	file="$3"
+	printf '  set %s {\n    type %s\n    flags interval\n' "$name" "$type"
+	if [ -s "$file" ]; then
+		printf '    elements = { '
+		guard_set_elements "$file"
+		printf ' }\n'
+	fi
+	printf '  }\n\n'
+}
+
+guard_render_classifier() {
+	local output work selector device pbr_mask
+	output="$1"
+	work="${TMPDIR:-/tmp}/ikev2-site-link-guard.$$"
+	mkdir "$work" || return 1
+	guard_prepare_dump 4 "$work/dest4"
+	guard_prepare_dump 6 "$work/dest6"
+	: >"$work/sources"
+	for selector in $(getv source_devices '@br-lan'); do
+		device="${selector#@}"
+		valid_device "$device" || { rm -rf "$work"; return 1; }
+		printf '%s\n' "$device" >>"$work/sources"
+	done
+	pbr_mask="$(guard_pbr_mask)"
+	[ $((guard_mark & pbr_mask)) -eq 0 ] || { rm -rf "$work"; return 1; }
+	{
+		printf 'table inet %s {\n' "$guard_nft_table"
+		printf '  set source_ifaces {\n    type ifname\n    elements = { '
+		awk 'BEGIN { first=1 } NF { if (!first) printf ", "; printf "\"%s\"", $0; first=0 }' "$work/sources"
+		printf ' }\n  }\n\n'
+		guard_write_set dest4 ipv4_addr "$work/dest4"
+		guard_write_set dest6 ipv6_addr "$work/dest6"
+		printf '  chain prerouting {\n'
+		printf '    type filter hook prerouting priority -151; policy accept;\n'
+		printf '    meta mark & %s != 0 return comment "ikev2-site-link:prior-policy"\n' "$pbr_mask"
+		printf '    iifname @source_ifaces ip daddr @dest4 meta mark set meta mark | %s counter comment "ikev2-site-link:classifier"\n' "$guard_mark"
+		printf '    iifname @source_ifaces ip6 daddr @dest6 meta mark set meta mark | %s counter comment "ikev2-site-link:classifier6"\n' "$guard_mark"
+		printf '  }\n}\n'
+	} >"$output"
+	rm -rf "$work"
+}
+
+guard_apply_classifier() {
+	local canonical batch
+	canonical="${TMPDIR:-/tmp}/ikev2-site-link-guard-canonical.$$"
+	batch="${TMPDIR:-/tmp}/ikev2-site-link-guard-batch.$$"
+	guard_render_classifier "$canonical" || { rm -f "$canonical" "$batch"; return 1; }
+	if [ -f "$guard_config_file" ] && cmp -s "$canonical" "$guard_config_file" &&
+	   guard_classifier_ready; then
+		rm -f "$canonical" "$batch"
+		return 0
+	fi
+	if "$nft_bin" list table inet "$guard_nft_table" >/dev/null 2>&1; then
+		guard_classifier_ready || { rm -f "$canonical" "$batch"; return 1; }
+		printf 'delete table inet %s\n' "$guard_nft_table" >"$batch"
+	fi
+	cat "$canonical" >>"$batch"
+	"$nft_bin" -c -f "$batch" >/dev/null 2>&1 || { rm -f "$canonical" "$batch"; return 1; }
+	"$nft_bin" -f "$batch" >/dev/null 2>&1 || { rm -f "$canonical" "$batch"; return 1; }
+	mkdir -p "${guard_config_file%/*}"
+	chmod 600 "$canonical"
+	mv "$canonical" "$guard_config_file"
+	rm -f "$batch"
+	guard_classifier_ready
+}
+
+guard_sync() {
+	dump_pbr_sets >/dev/null 2>&1 || true
+	guard_reconcile_routes || return 1
+	guard_apply_classifier || return 1
+	guard_runtime_ready
+}
+
+guard_remove() {
+	local family rule_match
+	guard_resources_available || return 1
+	rule_match="$(guard_rule_match)" || return 1
+	if "$nft_bin" list table inet "$guard_nft_table" >/dev/null 2>&1; then
+		guard_classifier_ready || return 1
+		"$nft_bin" delete table inet "$guard_nft_table" || return 1
+	fi
+	for family in 4 6; do
+		while guard_rule_ready "$family"; do
+			ip "-$family" rule del priority "$guard_rule_priority" \
+				fwmark "$rule_match" lookup "$guard_route_table" || return 1
+		done
+		if ip "-$family" rule show 2>/dev/null |
+			awk -v priority="$guard_rule_priority:" '$1 == priority { found=1 } END { exit !found }'; then
+			return 1
+		fi
+		ip "-$family" route flush table "$guard_route_table" 2>/dev/null || true
+	done
+	rm -f "$guard_config_file"
 }
 
 source_vip_ready() {
@@ -1634,7 +1997,7 @@ source_control_ready() {
 	if_id="$(getv if_id 44)"
 	global_pbr_contract_ready && global_dns_contract_ready && source_managed_config_ready &&
 	xfrm_ready "$device" "$if_id" && source_conn_loaded && source_sa_ready && probe_rule_ready &&
-		source_aux_rules_ready &&
+		source_aux_rules_ready && guard_runtime_ready &&
 		[ -n "$(source_sa_id)" ] && source_vip_ready && source_pbr_ready && source_routes_ready
 }
 
@@ -1663,6 +2026,11 @@ disabled_runtime_ready() {
 	! uci -q get pbr.ikev2_site_link_include >/dev/null 2>&1 || return 1
 	! ip -4 rule show 2>/dev/null |
 		awk -v priority="$probe_rule_priority:" '$1 == priority { found=1 } END { exit !found }' || return 1
+	! ip -4 rule show 2>/dev/null |
+		awk -v priority="$guard_rule_priority:" '$1 == priority { found=1 } END { exit !found }' || return 1
+	! ip -6 rule show 2>/dev/null |
+		awk -v priority="$guard_rule_priority:" '$1 == priority { found=1 } END { exit !found }' || return 1
+	! "$nft_bin" list table inet "$guard_nft_table" >/dev/null 2>&1 || return 1
 	for chain in pbr_prerouting pbr_forward mangle_forward; do
 		! "$nft_bin" list chain inet fw4 "$chain" 2>/dev/null |
 			grep -Eq 'IKEv2 Site Link: (YouTube|selected services|direct exit WAN)|ikev2-site-link-(force-youtube-tcp|mss-clamp)' || return 1
@@ -1679,10 +2047,11 @@ repair_source_structure() {
 		swanctl --load-creds --noprompt >/dev/null 2>&1 || return 1
 	fi
 	if source_sa_ready; then
-		sync_vip
+		sync_vip || return 1
 	else
-		reconcile_source_routes
+		reconcile_source_routes || return 1
 	fi
+	guard_sync
 }
 
 repair_exit_structure() {
@@ -1697,31 +2066,12 @@ repair_exit_structure() {
 	ensure_exit_route
 }
 
-repair_source_managed_config() {
-	source_uci_apply
-}
-
-repair_exit_managed_config() {
-	exit_uci_apply
-}
-
 connect_source() {
 	ensure_xfrm || return 1
 	swanctl --load-conns >/dev/null 2>&1 || return 1
 	swanctl --load-creds >/dev/null 2>&1 || return 1
 	swanctl --initiate --child site-link4 --timeout 20 >/dev/null 2>&1 || true
 	sync_vip
-}
-
-recover_source_data_plane() {
-	reset_source_sa || return 1
-	connect_source || return 1
-	if data_plane_ready; then
-		probe_save 1
-		return 0
-	fi
-	probe_save 0
-	return 1
 }
 
 connect_impl() {
@@ -1752,7 +2102,6 @@ apply_impl() {
 		secret_configured || die 'peer secret is not configured'
 		source_apply_transaction
 	fi
-	record_applied_resources
 	"$site_init" enable >/dev/null 2>&1 || true
 	"$site_init" restart >/dev/null 2>&1 || true
 	if [ "$(role)" = source ]; then
@@ -1804,6 +2153,7 @@ disable_impl() {
 	swanctl --load-creds --noprompt >/dev/null 2>&1 || cleanup_ok=0
 	delete_probe_rule "$(getv xfrm_device ipsec-home)" "$(getv interface sitehome)" || cleanup_ok=0
 	delete_probe_rule "$applied_source_device" "$applied_source_interface" || cleanup_ok=0
+	guard_remove || cleanup_ok=0
 	all_uci_remove || cleanup_ok=0
 	source_device="$(getv xfrm_device ipsec-home)"
 	exit_device="$(getv exit_device ipsec-site-exit)"
@@ -1883,14 +2233,17 @@ status_emit() {
 			"$(cat "/sys/class/net/$device/statistics/rx_bytes" 2>/dev/null || echo 0)" \
 			"$(cat "/sys/class/net/$device/statistics/tx_bytes" 2>/dev/null || echo 0)"
 		printf 'fail_closed=%s\n' "$(source_ipv4_terminal_ready && source_ipv6_terminal_ready &&
+			guard_route_ready &&
 			echo active || echo missing)"
-		printf 'route=%s\npbr=%s\ndata_plane=%s\ntunnel_data_plane=%s\nclassifier=%s\nclient_forwarding=%s\n' \
+		printf 'route=%s\npbr=%s\nguard=%s\ndata_plane=%s\ntunnel_data_plane=%s\nclassifier=%s\nclient_forwarding=%s\n' \
 			"$(source_routes_ready && echo healthy || echo missing)" \
 			"$(source_pbr_ready && source_aux_rules_ready && echo healthy || echo missing)" \
+			"$(guard_runtime_ready && echo healthy || echo missing)" \
 			"$(probe_recent_success && echo verified || echo unverified)" \
 			"$(probe_recent_success && echo verified || echo unverified)" \
 			"$(global_pbr_contract_ready && global_dns_contract_ready && policy_configuration_ready &&
-				source_pbr_ready && source_aux_rules_ready && echo healthy || echo missing)" \
+				source_pbr_ready && source_aux_rules_ready && guard_runtime_ready &&
+				echo healthy || echo missing)" \
 			"$(source_managed_config_ready && echo configured || echo missing)"
 		printf 'pbr_contract=%s\ndns_contract=%s\ncertificate_contract=not-applicable\n' \
 			"$(global_pbr_contract_ready && echo ready || echo missing)" \
@@ -1970,20 +2323,16 @@ monitor_loop() {
 	failures=0
 	first=1
 	last_attempt=0
-	last_pbr_repair=0
 	last_aux_repair=0
-	last_config_repair=0
 	last_set_dump=0
 	while :; do
 		if [ "$(getv enabled 0)" != 1 ]; then
-			if ! disabled_runtime_ready; then
-				status_write degraded 'disabled configuration still has managed runtime state'
-				try_with_lock disable-reconcile disable_impl monitor >/dev/null 2>&1 || true
-			fi
 			if disabled_runtime_ready; then
 				status_write disabled 'site link disabled'
 			else
-				status_write degraded 'disable cleanup is incomplete'
+				# Cleanup mutates network, firewall and PBR configuration. Never let a
+				# background monitor perform that transaction; require explicit Apply.
+				status_write degraded 'disabled configuration still has runtime state; apply Disable manually'
 			fi
 			[ "${SITE_LINK_MONITOR_ONCE:-0}" = 1 ] && break
 			monitor_wait 30
@@ -1997,13 +2346,8 @@ monitor_loop() {
 		fi
 		if [ "$(role)" = source ]; then
 			now="$(date +%s)"
-			if ! source_managed_config_ready &&
-			   time_due "$now" "$last_config_repair" 120; then
-				last_config_repair="$now"
-				try_with_lock source-config-reconcile repair_source_managed_config >/dev/null 2>&1 || true
-			fi
 			if time_due "$now" "$last_set_dump" 60; then
-				dump_pbr_sets >/dev/null 2>&1 || true
+				try_with_lock guard-sync guard_sync >/dev/null 2>&1 || true
 				last_set_dump="$now"
 			fi
 			# XFRM/VIP/default drift is cheap to repair and must be corrected on
@@ -2012,16 +2356,14 @@ monitor_loop() {
 			if ! source_conn_loaded ||
 			   ! xfrm_ready "$(getv xfrm_device ipsec-home)" "$(getv if_id 44)" ||
 			   ! probe_rule_ready ||
+			   ! guard_runtime_ready ||
 			   { source_sa_ready && { ! source_vip_ready || ! source_routes_ready; }; } ||
 			   { ! source_sa_ready && { ! source_fail_closed_ready || source_live_route_ready; }; }; then
 				try_with_lock source-reconcile repair_source_structure >/dev/null 2>&1 || true
 			fi
-			if ! source_pbr_ready && time_due "$now" "$last_pbr_repair" 120; then
-				# A failed reload can still disturb forwarding. Rate-limit attempts,
-				# not just successful completions.
-				last_pbr_repair="$now"
-				try_with_lock pbr-reload repair_source_pbr >/dev/null 2>&1 || true
-			fi
+			# Managed UCI/PBR drift is intentionally not repaired here. A global PBR
+			# reload disables forwarding on current OpenWrt PBR releases and must be
+			# an explicit, visible transaction rather than a watchdog side effect.
 			if source_pbr_ready && ! source_aux_rules_ready &&
 			   time_due "$now" "$last_aux_repair" 60; then
 				last_aux_repair="$now"
@@ -2044,14 +2386,9 @@ monitor_loop() {
 			if source_control_ready && probe_due "$now"; then
 				if data_plane_ready; then probe_save 1; else probe_save 0; fi
 			fi
-			probe_failures="$(probe_failure_count)"
-			threshold="$(getv failure_threshold 3)"
-			cooldown="$(getv reconnect_cooldown 30)"
-			if source_control_ready && [ "$probe_failures" -ge "$threshold" ] &&
-			   time_due "$now" "$last_attempt" "$cooldown"; then
-				last_attempt="$now"
-				try_with_lock data-reconnect recover_source_data_plane >/dev/null 2>&1 || true
-			fi
+			# Public probe failures are telemetry only. strongSwan DPD reconnects a
+			# dead peer; the monitor must not reset an installed SA due to an external
+			# service or path-specific failure.
 			if source_control_ready && probe_recent_success; then
 				status_write ok 'control plane and bidirectional data plane are healthy'
 			else
@@ -2059,19 +2396,10 @@ monitor_loop() {
 			fi
 		else
 			now="$(date +%s)"
-			if ! exit_managed_config_ready &&
-			   time_due "$now" "$last_config_repair" 120; then
-				last_config_repair="$now"
-				try_with_lock exit-config-reconcile repair_exit_managed_config >/dev/null 2>&1 || true
-			fi
 			if ! exit_conn_loaded ||
 			   ! xfrm_ready "$(getv exit_device ipsec-site-exit)" "$(getv exit_if_id 45)" ||
 			   ! exit_route_ready; then
 				try_with_lock exit-reconcile repair_exit_structure >/dev/null 2>&1 || true
-			fi
-			if ! exit_pbr_ready && time_due "$now" "$last_pbr_repair" 120; then
-				last_pbr_repair="$now"
-				try_with_lock pbr-reload pbr_reload_checked >/dev/null 2>&1 || true
 			fi
 			if exit_sa_ready; then
 				exit_traffic_update >/dev/null 2>&1 || true

@@ -60,6 +60,7 @@ output="$root/dist/apk"
 mkdir -p "$output"
 rm -f "$output"/*.apk
 artifact="$output/$PKG_NAME-$PKG_VERSION.apk"
+runtime_dependencies='libc luci-base rpcd-mod-file pbr ip-full kmod-xfrm-interface strongswan strongswan-charon strongswan-swanctl strongswan-mod-aes strongswan-mod-attr strongswan-mod-constraints strongswan-mod-eap-identity strongswan-mod-eap-mschapv2 strongswan-mod-gcm strongswan-mod-gmp strongswan-mod-hmac strongswan-mod-kdf strongswan-mod-kernel-netlink strongswan-mod-md4 strongswan-mod-openssl strongswan-mod-pem strongswan-mod-pkcs1 strongswan-mod-pubkey strongswan-mod-random strongswan-mod-sha2 strongswan-mod-socket-default strongswan-mod-vici strongswan-mod-x509 openssl-util curl'
 
 # Package metadata must never depend on the uid that happens to run CI. The
 # SDK's fakeroot records every directory and file as root:root without needing
@@ -72,7 +73,7 @@ STAGING_DIR_HOST="$sdk/staging_dir/host" "$fakeroot_bin" "$apk_tool" mkpkg \
 	--info 'license:MIT' \
 	--info "origin:$PKG_NAME" \
 	--info 'maintainer:nikitid' \
-	--info 'depends:libc luci-base rpcd-mod-file pbr strongswan-swanctl kmod-xfrm-interface openssl-util curl' \
+	--info "depends:$runtime_dependencies" \
 	--script "post-install:$root/scripts/package-postinst.sh" \
 	--script "post-upgrade:$root/scripts/package-postinst.sh" \
 	--script "pre-deinstall:$root/scripts/package-prerm.sh" \

@@ -29,6 +29,14 @@ immediately retry over TCP through the exit router's Zapret strategy. If the CHI
 address is unavailable, the PBR table keeps an unreachable default and matching
 traffic cannot fall back to the source WAN.
 
+The source also keeps an application-owned fallback classifier built from the
+last confirmed PBR destination sets. Its RPDB rule matches only while no normal
+PBR routing bits are present, so Manager device overrides, Reliable-mode TProxy
+and the active PBR policy retain their normal precedence. If a firewall/PBR
+rebuild temporarily removes the normal classifier, the fallback sends the
+confirmed destinations to the same XFRM interface or its unreachable terminal
+route; it does not rebuild global PBR state.
+
 The monitor treats an installed SA as only one health signal. Status separates
 the tunnel data plane, destination classifier, and configured client-forwarding
 path. The source HTTPS probe verifies the router-originated tunnel path; it does
@@ -36,7 +44,10 @@ not claim to originate from a LAN client. Client forwarding therefore reports
 `configured`, not `verified`, and is based on exact managed network, firewall,
 forwarding and PBR invariants. The exit also requires its permanent `/32` return
 route, dedicated-port DNAT and evidence of traffic in both CHILD_SA directions.
-Missing managed rules and routes are reconciled under the shared action lock.
+Cheap runtime drift (XFRM device, VIP, peer route and owned auxiliary nftables
+rules) is reconciled under the shared action lock. Managed UCI, firewall and PBR
+drift is reported as degraded and requires an explicit Apply; the background
+monitor never starts a forwarding-disruptive PBR rebuild.
 The source installs one narrow RPDB rule for locally generated sockets bound to
 its XFRM device, so the HTTPS probe uses the PBR table instead of the router's
 ordinary main-table default.
@@ -59,13 +70,16 @@ ordinary main-table default.
   reload;
 - short-lived IPv4 and IPv6 PBR set snapshots for clients with warm DNS caches,
   plus an unreachable IPv6 policy route because the tunnel is IPv4-only;
+- an independent fallback classifier which is dormant whenever a normal PBR
+  mark exists and retains the last confirmed route during classifier rebuilds;
 - verified PBR reloads; the site-link runtime never uses the disruptive PBR
   restart path;
 - no strongSwan-wide clear/reload during disable; the link never owns other
   applications' connections or credentials;
 - package removal refuses to continue if managed routing cannot be disabled;
-- `enabled=0` is reconciled to a complete role-independent teardown, including
+- explicit Disable performs a complete role-independent teardown, including
   both profiles, SAs, XFRM devices, policy rules and cached DNS-set state;
+  the monitor reports incomplete teardown but never mutates global UCI/PBR;
 - peer secrets are write-only in LuCI and are never stored in UCI; replacement
   secrets are staged, activated on the exit without terminating the live SA,
   then activated and authenticated on the source with automatic local rollback;
@@ -74,19 +88,24 @@ ordinary main-table default.
 - a dedicated /32 tunnel address which must not overlap LAN or VPN pools;
 - the exit firewall has no forwarding path to the router or LAN.
 
-The editable `main` UCI section is candidate configuration. A successful apply
-atomically records every runtime option in the credential-free `applied`
-section. Monitor, procd startup, hotplug, reconnect and policy reload read only
-that snapshot, so saving or rejecting a candidate cannot retarget a live repair.
+The editable `main` UCI section is candidate configuration. Apply snapshots the
+application, network, firewall, PBR and generated-profile state, validates the
+new control and data planes, and only then records every runtime option in the
+credential-free `applied` section. A failed activation restores the previous
+snapshot and never records the rejected candidate. Monitor, procd startup,
+hotplug, reconnect and policy reload read only the applied snapshot, so saving
+or rejecting a candidate cannot retarget a live repair.
 Disable the link before changing resource identities or switching roles.
 
 The explicit global contract is `pbr.config.enabled=1`,
 `pbr.config.strict_enforcement=1`, and, on the source,
-`pbr.config.resolver_set=dnsmasq.nftset`. IKEv2 Manager normally owns those
-global settings and the exit certificate. Without Manager, the administrator
-must maintain them; Site Link checks and reports the contract but does not take
-ownership of global PBR/DNS or certificate lifecycle. The source role requires
-the certificate identity and endpoint.
+`pbr.config.ipv6_enabled=1` plus `pbr.config.resolver_set=dnsmasq.nftset` backed
+by a dnsmasq binary which actually advertises nftset support. IKEv2 Manager
+normally owns those global settings and the exit certificate. Without Manager,
+the administrator must maintain them; Site Link checks and reports the contract
+but does not take ownership of global PBR/DNS or certificate lifecycle. Exit
+Apply also verifies certificate lifetime, configured hostname identity, private
+key validity and the certificate/key public-key match.
 Both roles must use the same `ike_port` value (UDP/1500 by default). The exit
 router creates the narrow DNAT rule automatically; no additional strongSwan
 listener or WAN restart is required. UDP/500 is deliberately not the DNAT
@@ -111,6 +130,13 @@ must also run `secret-rollback` on the exit. A WAN loss between the two activati
 steps can therefore require that rollback, but normal unattended operation has
 no partially staged credential transition.
 
+Configuration changes are also deliberately coordinated rather than repaired
+implicitly by either peer. Apply and validate the exit role first, without
+removing its previous return path, then apply the source role and validate the
+SA, virtual address and classifier. If the source activation fails, roll the
+source back before changing the exit. Each monitor owns only cheap local runtime
+state; neither monitor rewrites the peer, managed UCI or global PBR state.
+
 ## Commands
 
 ```sh
@@ -134,6 +160,9 @@ read-only.
 `probe_interval` should have the same value on both routers: the source uses it
 as the active HTTPS probe cadence and the exit treats three times that interval
 without progress in either CHILD direction as stale.
+Source Apply accepts the data plane only after one of two independently hosted
+HTTPS probes succeeds through the XFRM device. Later public-probe failures are
+telemetry: they do not tear down an otherwise installed SA.
 
 ## Install
 
@@ -156,6 +185,10 @@ apk upgrade luci-app-ikev2-site-link
 
 The supported target is OpenWrt `25.12.5`, `mediatek/filogic`,
 `aarch64_cortex-a53`, matching the rest of the feed.
+The package declares the complete strongSwan/EAP runtime subset, `ip-full`,
+XFRM, OpenSSL and curl that its source and exit roles execute. Package-manager
+transactions must still keep all installed strongSwan components on one matched
+build/version cohort.
 
 ## Release builds
 
