@@ -128,6 +128,7 @@ for dependency in ip-full strongswan-charon strongswan-mod-eap-mschapv2 \
 done
 
 "$root/scripts/test-runtime.sh"
+"$root/scripts/test-package-lifecycle.sh"
 "$root/scripts/test-policy.sh"
 "$root/scripts/test-recovery.sh"
 

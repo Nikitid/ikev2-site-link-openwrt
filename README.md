@@ -55,6 +55,8 @@ ordinary main-table default.
 ## Safety properties
 
 - no router reboot or WAN restart;
+- package upgrades restart only the Site Link monitor so the installed runtime
+  takes effect without terminating the live SA or rebuilding PBR;
 - separate connection, XFRM interface and generated UCI sections;
 - atomic strongSwan profile and secret installation;
 - actions and PBR reloads serialized with IKEv2 Manager through the shared
