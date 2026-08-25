@@ -106,7 +106,7 @@ grep -Fq 'guard_rule_match()' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'combined_mask=$((guard_mask | pbr_mask))' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'pbr.config.ipv6_enabled' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'dnsmasq -v' "$root/runtime/ikev2-site-link.sh"
-grep -Fq 'openssl x509 -in "$server_cert_file" -noout -checkhost "$identity"' \
+grep -Fq 'openssl verify -no-CAfile -no-CApath -partial_chain' \
 	"$root/runtime/ikev2-site-link.sh"
 grep -Fq 'probe_fallback_url=' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'firewall.ikev2_site_link_ike.target' "$root/runtime/ikev2-site-link.sh"
