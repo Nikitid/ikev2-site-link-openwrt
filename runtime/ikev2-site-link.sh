@@ -1201,7 +1201,11 @@ server_certificate_validate_raw() {
 	}
 	identity="$(getv remote_id)"
 	[ -n "$identity" ] || return 1
-	openssl x509 -in "$server_cert_file" -noout -checkhost "$identity" >/dev/null 2>&1 || {
+	# OpenSSL 3 `x509 -checkhost` prints a mismatch but still exits zero. Use
+	# the verifier so hostname mismatch is represented by a reliable status.
+	openssl verify -no-CAfile -no-CApath -partial_chain \
+		-trusted "$server_cert_file" -verify_hostname "$identity" \
+		"$server_cert_file" >/dev/null 2>&1 || {
 		printf 'ikev2-site-link: exit certificate does not match %s\n' "$identity" >&2
 		return 1
 	}
