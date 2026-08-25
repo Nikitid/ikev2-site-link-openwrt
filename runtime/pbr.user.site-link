@@ -143,7 +143,8 @@ for site_link_family in 4 6; do
 		grep -Eq '^[0-9A-Fa-f:]+(/[0-9]+)?$' "$site_link_dump" || continue
 		grep -Ev '^[0-9A-Fa-f:]+(/[0-9]+)?$' "$site_link_dump" | grep -q . && continue
 	fi
-	site_link_saved="$(stat -c %Y "$site_link_dump" 2>/dev/null || echo 0)"
+	site_link_saved="$(date -r "$site_link_dump" +%s 2>/dev/null ||
+		stat -c %Y "$site_link_dump" 2>/dev/null || echo 0)"
 	site_link_now="$(date +%s)"
 	case "$site_link_saved" in '' | *[!0-9]*) continue ;; esac
 	[ $((site_link_now - site_link_saved)) -ge 0 ] || continue
