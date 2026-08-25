@@ -171,15 +171,29 @@ pbr.ikev2_site_link.proto=all
 pbr.ikev2_site_link.enabled=1
 EOF
 chmod 755 "$tmp/bin"/*
+ln -s "$(command -v openssl)" "$tmp/bin/openssl"
 : >"$tmp/ip.log"
 : >"$tmp/pbr.log"
 printf '%s\n' ready >"$tmp/nft.state"
 printf '%s\n' '10.253.44.2 dev wan' >"$tmp/exit.route"
 : >"$tmp/exit.sa"
 : >"$tmp/service.log"
-: >"$tmp/server-cert.pem"
-: >"$tmp/server-key.pem"
-printf '%s\n' fixture >"$tmp/server-cert.pem"
+cat >"$tmp/server-cert.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = ext
+[dn]
+CN = vpn.example.net
+[ext]
+subjectAltName = DNS:vpn.example.net
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+EOF
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+	-keyout "$tmp/server-key.pem" -out "$tmp/server-cert.pem" \
+	-config "$tmp/server-cert.cnf" >/dev/null 2>&1
 
 # Releases before the full applied snapshot could leave only an applied role.
 # Treat that section as incomplete and migrate the active candidate instead of
@@ -206,7 +220,6 @@ IKEV2_ACTION_LOCK_STATUS="$tmp/migrate-action.status" \
 grep -Fxq 'ikev2-site-link.applied.enabled=1' "$tmp/migrate.uci"
 grep -Fxq 'ikev2-site-link.applied.role=source' "$tmp/migrate.uci"
 grep -Fxq 'ikev2-site-link.applied.endpoint=vpn.example.net' "$tmp/migrate.uci"
-printf '%s\n' fixture >"$tmp/server-key.pem"
 
 run_exit_monitor() {
 	PATH="$tmp/bin:/usr/bin:/bin" \
@@ -231,6 +244,7 @@ run_exit_monitor() {
 	SITE_LINK_TEST_SERVICE_LOG="$tmp/service.log" \
 	SITE_LINK_SERVER_CERT="$tmp/server-cert.pem" \
 	SITE_LINK_SERVER_KEY="$tmp/server-key.pem" \
+	SITE_LINK_CERT_STATE="$tmp/cert.status" \
 	SITE_LINK_MONITOR_ONCE=1 \
 		sh "$root/runtime/ikev2-site-link.sh" monitor
 }
@@ -258,6 +272,7 @@ run_exit_monitor_continuous() {
 	SITE_LINK_TEST_SERVICE_LOG="$tmp/service.log" \
 	SITE_LINK_SERVER_CERT="$tmp/server-cert.pem" \
 	SITE_LINK_SERVER_KEY="$tmp/server-key.pem" \
+	SITE_LINK_CERT_STATE="$tmp/cert.status" \
 		exec sh "$root/runtime/ikev2-site-link.sh" monitor
 }
 
@@ -265,9 +280,22 @@ run_exit_monitor_continuous() {
 run_exit_monitor
 grep -Fxq '10.253.44.2 dev ipsec-site-exit' "$tmp/exit.route"
 [ "$(grep -c '^route-replace$' "$tmp/ip.log")" = 1 ]
-grep -Fxq 'state=idle' "$tmp/status"
+grep -Fxq 'state=idle' "$tmp/status" || { cat "$tmp/status" >&2; exit 1; }
 run_exit_monitor
 [ "$(grep -c '^route-replace$' "$tmp/ip.log")" = 1 ]
+
+# The responder certificate must match the applied public identity. A candidate
+# edit does not matter, while an invalid applied identity degrades the exit.
+sed 's/ikev2-site-link.applied.remote_id=vpn.example.net/ikev2-site-link.applied.remote_id=wrong.example.net/' \
+	"$tmp/exit.uci" >"$tmp/exit.uci.next"
+mv "$tmp/exit.uci.next" "$tmp/exit.uci"
+run_exit_monitor 2>/dev/null
+grep -Fxq 'state=degraded' "$tmp/status"
+sed 's/ikev2-site-link.applied.remote_id=wrong.example.net/ikev2-site-link.applied.remote_id=vpn.example.net/' \
+	"$tmp/exit.uci" >"$tmp/exit.uci.next"
+mv "$tmp/exit.uci.next" "$tmp/exit.uci"
+run_exit_monitor
+grep -Fxq 'state=idle' "$tmp/status"
 
 # Editing candidate values alone must not retarget a live monitor iteration.
 sed 's/ikev2-site-link.main.exit_pool=10.253.44.2/ikev2-site-link.main.exit_pool=10.253.44.99/' \
@@ -280,8 +308,8 @@ if grep -Fq '10.253.44.99' "$tmp/ip.log"; then
 	exit 1
 fi
 
-# Exact managed UCI invariants are reconciled, including the forwarding, DNAT
-# and concrete PBR fields; this is intentionally stronger than a chain comment.
+# Exact managed UCI drift is reported but never reconciled by the monitor. A
+# repair can reload network/firewall/PBR and therefore requires explicit Apply.
 for key in firewall.ikev2_site_link_exit_wan.dest \
 	firewall.ikev2_site_link_ike.target pbr.ikev2_site_link.interface; do
 	awk -F= -v key="$key" '$1 != key { print }' "$tmp/exit.uci" >"$tmp/exit.uci.next"
@@ -289,10 +317,16 @@ for key in firewall.ikev2_site_link_exit_wan.dest \
 done
 : >"$tmp/service.log"
 run_exit_monitor
-grep -Fxq 'firewall.ikev2_site_link_exit_wan.dest=wan' "$tmp/exit.uci"
-grep -Fxq 'firewall.ikev2_site_link_ike.target=DNAT' "$tmp/exit.uci"
-grep -Fxq 'pbr.ikev2_site_link.interface=wan' "$tmp/exit.uci"
-grep -q 'service-reload reload' "$tmp/service.log"
+! grep -q '^firewall.ikev2_site_link_exit_wan.dest=' "$tmp/exit.uci"
+! grep -q '^firewall.ikev2_site_link_ike.target=' "$tmp/exit.uci"
+! grep -q '^pbr.ikev2_site_link.interface=' "$tmp/exit.uci"
+[ ! -s "$tmp/service.log" ]
+grep -Fxq 'state=degraded' "$tmp/status"
+cat >>"$tmp/exit.uci" <<'EOF'
+firewall.ikev2_site_link_exit_wan.dest=wan
+firewall.ikev2_site_link_ike.target=DNAT
+pbr.ikev2_site_link.interface=wan
+EOF
 
 # A repair must not erase the monitor's outer TERM/EXIT handlers. Otherwise a
 # later procd stop needs SIGKILL and leaves its PID lock behind.
@@ -335,15 +369,17 @@ mv "$tmp/exit.sa.next" "$tmp/exit.sa"
 run_exit_monitor
 grep -Fxq 'state=ok' "$tmp/status"
 
-# A missing PBR rule uses verified reload and never the destructive restart path.
+# A missing PBR rule is visible but never triggers a background global reload.
 : >"$tmp/nft.state"
 : >"$tmp/pbr.log"
 run_exit_monitor
-[ "$(grep -c '^reload$' "$tmp/pbr.log")" = 1 ]
-if grep -Fq restart "$tmp/pbr.log"; then
-	echo 'monitor used PBR restart' >&2
+[ ! -s "$tmp/pbr.log" ]
+grep -Fxq 'state=degraded' "$tmp/status"
+if grep -Eq '^(reload|restart)$' "$tmp/pbr.log"; then
+	echo 'monitor rebuilt PBR' >&2
 	exit 1
 fi
+printf '%s\n' fixture >"$tmp/nft.state"
 
 # The monitor never repairs across another package's live global action lock.
 : >"$tmp/ip.log"
@@ -760,6 +796,7 @@ ikev2-site-link.applied.reconnect_cooldown=30
 ikev2-site-link.applied.force_tcp=1
 pbr.config.enabled=1
 pbr.config.strict_enforcement=1
+pbr.config.ipv6_enabled=1
 pbr.config.resolver_set=dnsmasq.nftset
 network.lan.device=br-lan
 network.sitehome=interface
@@ -826,6 +863,7 @@ EOF
 cat >"$tmp/bin/ip-apply" <<'EOF'
 #!/bin/sh
 rules="${SITE_LINK_TEST_APPLY_RULES:?}"
+rules6="$rules.6"
 case "$*" in
 	'-4 route show match 10.253.44.2') echo 'default via 192.0.2.1 dev wan' ;;
 	'-d link show ipsec-home') echo '8: ipsec-home: <NOARP,UP> mtu 1360 xfrm if_id 0x2c' ;;
@@ -837,10 +875,30 @@ case "$*" in
 		printf '%s\n' 'unreachable default metric 32767' 'default dev ipsec-home metric 10'
 		;;
 	'-6 route show table pbr_sitehome') echo 'unreachable default dev lo metric 32767 pref medium' ;;
+	'-4 route show table 10445')
+		printf '%s\n' 'unreachable default metric 32767' 'default dev ipsec-home metric 10'
+		;;
+	'-6 route show table 10445') echo 'unreachable default dev lo metric 32767 pref medium' ;;
+	'-4 route replace unreachable default metric 32767 table 10445' | \
+	'-4 route replace default dev ipsec-home metric 10 table 10445' | \
+	'-6 route replace unreachable default metric 32767 table 10445')
+		printf 'ip %s\n' "$*" >>"$SITE_LINK_TEST_EVENTS"
+		;;
 	'-4 rule show') cat "$rules" ;;
+	'-6 rule show') cat "$rules6" 2>/dev/null || true ;;
 	'-4 rule add priority 10444 oif ipsec-home lookup pbr_sitehome')
-		printf '%s\n' '10444: from all oif ipsec-home lookup pbr_sitehome' >"$rules"
+		grep -v '^10444:' "$rules" >"$rules.next" || true
+		printf '%s\n' '10444: from all oif ipsec-home lookup pbr_sitehome' >>"$rules.next"
+		mv "$rules.next" "$rules"
 		printf '%s\n' 'ip probe-rule-add' >>"$SITE_LINK_TEST_EVENTS"
+		;;
+	'-4 rule add priority 10445 fwmark 0x1000000/0x1ff0000 lookup 10445')
+		printf '%s\n' '10445: from all fwmark 0x1000000/0x1ff0000 lookup 10445' >>"$rules"
+		printf '%s\n' 'ip guard4-rule-add' >>"$SITE_LINK_TEST_EVENTS"
+		;;
+	'-6 rule add priority 10445 fwmark 0x1000000/0x1ff0000 lookup 10445')
+		printf '%s\n' '10445: from all fwmark 0x1000000/0x1ff0000 lookup 10445' >>"$rules6"
+		printf '%s\n' 'ip guard6-rule-add' >>"$SITE_LINK_TEST_EVENTS"
 		;;
 	*) printf 'unexpected apply ip command: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -861,6 +919,20 @@ EOF
 cat >"$tmp/bin/nft-apply" <<'EOF'
 #!/bin/sh
 case "$*" in
+	'list set inet fw4 pbr_sitehome_4_dst_ip_ikev2_site_link')
+		echo 'set pbr_sitehome_4_dst_ip_ikev2_site_link { elements = { 203.0.113.7 } }'
+		;;
+	'list set inet fw4 pbr_sitehome_6_dst_ip_ikev2_site_link') exit 1 ;;
+	'list table inet ikev2_site_link_guard')
+		[ -s "$SITE_LINK_TEST_GUARD_STATE" ] || exit 1
+		echo 'counter comment "ikev2-site-link:classifier"'
+		;;
+	'-c -f '*) [ -s "${3:-}" ] ;;
+	'-f '*)
+		[ -s "${2:-}" ] || exit 1
+		printf '%s\n' ready >"$SITE_LINK_TEST_GUARD_STATE"
+		printf '%s\n' 'nft guard-apply' >>"$SITE_LINK_TEST_EVENTS"
+		;;
 	'list chain inet fw4 pbr_prerouting')
 		echo 'meta mark set 0x10000 comment "IKEv2 Site Link: selected services"'
 		;;
@@ -890,6 +962,10 @@ cat >"$tmp/bin/modprobe-apply" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+cat >"$tmp/bin/dnsmasq-apply" <<'EOF'
+#!/bin/sh
+echo 'Compile time options: IPv6 UBus nftset'
+EOF
 cat >"$tmp/bin/pbr-helper-apply" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
@@ -903,13 +979,14 @@ esac
 EOF
 chmod 755 "$tmp/bin/uci-apply" "$tmp/bin/ip-apply" "$tmp/bin/swanctl-apply" \
 	"$tmp/bin/nft-apply" "$tmp/bin/curl-apply" "$tmp/bin/modprobe-apply" \
-	"$tmp/bin/pbr-helper-apply"
+	"$tmp/bin/dnsmasq-apply" "$tmp/bin/pbr-helper-apply"
 mkdir "$tmp/apply-bin" "$tmp/apply-config" "$tmp/apply-swanctl"
 ln -s "$tmp/bin/uci-apply" "$tmp/apply-bin/uci"
 ln -s "$tmp/bin/ip-apply" "$tmp/apply-bin/ip"
 ln -s "$tmp/bin/swanctl-apply" "$tmp/apply-bin/swanctl"
 ln -s "$tmp/bin/curl-apply" "$tmp/apply-bin/curl"
 ln -s "$tmp/bin/modprobe-apply" "$tmp/apply-bin/modprobe"
+ln -s "$tmp/bin/dnsmasq-apply" "$tmp/apply-bin/dnsmasq"
 for config_file in network firewall pbr; do
 	printf 'original-%s\n' "$config_file" >"$tmp/apply-config/$config_file"
 done
@@ -923,8 +1000,11 @@ cp "$tmp/apply-swanctl/source.conf" "$tmp/old-source.conf"
 cp "$tmp/apply-swanctl/source-secret.conf" "$tmp/old-source-secret.conf"
 printf '%s\n' fixture-secret >"$tmp/client.secret"
 printf '%s\n' '10444: from all oif ipsec-home lookup pbr_sitehome' >"$tmp/apply.rules"
+: >"$tmp/apply.rules.6"
 : >"$tmp/apply.aux"
 : >"$tmp/apply.events"
+: >"$tmp/apply.guard"
+printf '%s\n' owned >"$tmp/apply-guard.nft"
 printf '%s\n' youtube.com >"$tmp/policy.domains"
 printf '%s\n' 203.0.113.0/24 >"$tmp/policy.addresses"
 sed "s|POLICY_DOMAINS|$tmp/policy.domains|; s|POLICY_ADDRESSES|$tmp/policy.addresses|; s|PBR_HELPER|$tmp/bin/pbr-helper-apply|" \
@@ -935,6 +1015,7 @@ if PATH="$tmp/apply-bin:/usr/bin:/bin" \
 	SITE_LINK_TEST_EVENTS="$tmp/apply.events" \
 	SITE_LINK_TEST_APPLY_RULES="$tmp/apply.rules" \
 	SITE_LINK_TEST_AUX_STATE="$tmp/apply.aux" \
+	SITE_LINK_TEST_GUARD_STATE="$tmp/apply.guard" \
 	SITE_LINK_UCI_DIR="$tmp/apply-config" \
 	SITE_LINK_CONN="$tmp/apply-swanctl/source.conf" \
 	SITE_LINK_CRED="$tmp/apply-swanctl/source-secret.conf" \
@@ -949,6 +1030,11 @@ if PATH="$tmp/apply-bin:/usr/bin:/bin" \
 	SITE_LINK_FW4="$tmp/bin/service-disable" \
 	SITE_LINK_INIT="$tmp/bin/service-disable" \
 	SITE_LINK_NFT="$tmp/bin/nft-apply" \
+	SITE_LINK_GUARD_CONFIG="$tmp/apply-guard.nft" \
+	SITE_LINK_SET_DUMP4="$tmp/apply-set4.dump" \
+	SITE_LINK_SET_DUMP6="$tmp/apply-set6.dump" \
+	SITE_LINK_PERSISTENT_SET_DUMP4="$tmp/apply-persistent4.dump" \
+	SITE_LINK_PERSISTENT_SET_DUMP6="$tmp/apply-persistent6.dump" \
 	SITE_LINK_ROLLBACK_ROOT="$tmp" \
 	SITE_LINK_LOCK="$tmp/apply-site.lock" \
 	IKEV2_ACTION_LOCK="$tmp/apply-action.lock" \
@@ -973,6 +1059,11 @@ cmp -s "$tmp/old-source-secret.conf" "$tmp/apply-swanctl/source-secret.conf" || 
 }
 [ "$(grep -c '^swanctl --terminate --ike site-link --timeout 5$' "$tmp/apply.events")" = 2 ]
 [ "$(grep -c '^swanctl --initiate --child site-link4 --timeout 20$' "$tmp/apply.events")" = 2 ]
+grep -Fxq 'nft guard-apply' "$tmp/apply.events"
+if grep -Fq 'uci set ikev2-site-link.applied=' "$tmp/apply.events"; then
+	echo 'failed candidate was recorded as the applied configuration' >&2
+	exit 1
+fi
 if grep -Eq '^service (enable|restart)$' "$tmp/apply.events"; then
 	echo 'rejected candidate restarted the service' >&2
 	exit 1
@@ -986,13 +1077,16 @@ grep -Fq 'uci set firewall.ikev2_site_link_src_2.dest=sitehome' "$tmp/apply.even
 # replacement; merely reporting degraded would leave a black-holed tunnel up.
 printf '%s\n' 'last=0' 'success=0' 'failures=2' 'sa_id=7' >"$tmp/probe.status"
 : >"$tmp/apply.rules"
+: >"$tmp/apply.rules.6"
 : >"$tmp/apply.aux"
 : >"$tmp/apply.events"
+: >"$tmp/apply.guard"
 PATH="$tmp/apply-bin:/usr/bin:/bin" \
 SITE_LINK_TEST_UCI_STATE="$tmp/apply.uci" \
 SITE_LINK_TEST_EVENTS="$tmp/apply.events" \
 SITE_LINK_TEST_APPLY_RULES="$tmp/apply.rules" \
 SITE_LINK_TEST_AUX_STATE="$tmp/apply.aux" \
+SITE_LINK_TEST_GUARD_STATE="$tmp/apply.guard" \
 SITE_LINK_UCI_DIR="$tmp/apply-config" \
 SITE_LINK_CONN="$tmp/apply-swanctl/source.conf" \
 SITE_LINK_CRED="$tmp/apply-swanctl/source-secret.conf" \
@@ -1007,6 +1101,11 @@ SITE_LINK_FIREWALL_INIT="$tmp/bin/service-disable" \
 SITE_LINK_FW4="$tmp/bin/service-disable" \
 SITE_LINK_INIT="$tmp/bin/service-disable" \
 SITE_LINK_NFT="$tmp/bin/nft-apply" \
+SITE_LINK_GUARD_CONFIG="$tmp/apply-guard.nft" \
+SITE_LINK_SET_DUMP4="$tmp/apply-set4.dump" \
+SITE_LINK_SET_DUMP6="$tmp/apply-set6.dump" \
+SITE_LINK_PERSISTENT_SET_DUMP4="$tmp/apply-persistent4.dump" \
+SITE_LINK_PERSISTENT_SET_DUMP6="$tmp/apply-persistent6.dump" \
 SITE_LINK_PROBE_STATE="$tmp/probe.status" \
 SITE_LINK_STATE="$tmp/source-monitor.status" \
 SITE_LINK_LOCK="$tmp/source-monitor-site.lock" \
@@ -1015,12 +1114,14 @@ IKEV2_ACTION_LOCK="$tmp/source-monitor-action.lock" \
 IKEV2_ACTION_LOCK_STATUS="$tmp/source-monitor-action.status" \
 SITE_LINK_MONITOR_ONCE=1 \
 	sh "$root/runtime/ikev2-site-link.sh" monitor
-[ "$(grep -c '^swanctl --terminate --ike site-link --timeout 5$' "$tmp/apply.events")" = 1 ]
-[ "$(grep -c '^swanctl --initiate --child site-link4 --timeout 20$' "$tmp/apply.events")" = 1 ]
+if grep -Eq '^swanctl --(terminate|initiate)' "$tmp/apply.events"; then
+	echo 'monitor reset a healthy SA because a public probe failed' >&2
+	exit 1
+fi
 grep -Fxq 'ip probe-rule-add' "$tmp/apply.events"
 grep -Fxq 'pbr aux-repair' "$tmp/apply.events"
 grep -Fxq '10444: from all oif ipsec-home lookup pbr_sitehome' "$tmp/apply.rules"
-grep -Fxq 'failures=4' "$tmp/probe.status"
+grep -Fxq 'failures=3' "$tmp/probe.status"
 grep -Fxq 'state=degraded' "$tmp/source-monitor.status"
 
 printf '%s\n' 'recovery tests OK'

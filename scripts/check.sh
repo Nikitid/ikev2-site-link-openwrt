@@ -36,6 +36,10 @@ if grep -Eq '/etc/init\.d/pbr[[:space:]]+restart|pbr_init.*restart' \
 	echo 'direct PBR restart found in runtime' >&2
 	exit 1
 fi
+if grep -Fq '(set -e;' "$root/runtime/ikev2-site-link.sh"; then
+	echo 'conditional transaction still relies on suppressed shell errexit semantics' >&2
+	exit 1
+fi
 if grep -Fq '"$pbr_init" reload >/dev/null || return 1' \
 	"$root/runtime/ikev2-site-link.sh"; then
 	echo 'PBR reload still trusts the init-script exit code' >&2
@@ -98,6 +102,13 @@ grep -Fq 'ikev2-site-link.applied.role' "$root/runtime/90-ikev2-site-link"
 grep -Fq 'tunnel_data_plane=%s' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'classifier=%s' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'client_forwarding=%s' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'guard_rule_match()' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'combined_mask=$((guard_mask | pbr_mask))' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'pbr.config.ipv6_enabled' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'dnsmasq -v' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'openssl x509 -in "$server_cert_file" -noout -checkhost "$identity"' \
+	"$root/runtime/ikev2-site-link.sh"
+grep -Fq 'probe_fallback_url=' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'firewall.ikev2_site_link_ike.target' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'exit_wan_zone' "$root/openwrt/files/etc/config/ikev2-site-link"
 grep -Fq 'file://$domains_file file://$addresses_file' "$root/runtime/ikev2-site-link.sh"
@@ -109,6 +120,12 @@ fi
 grep -Fq 'user_services_dir="${SITE_LINK_POLICY_USER_SERVICES_DIR:-/etc/ikev2-site-link/services.d}"' \
 	"$root/runtime/ikev2-site-link-policy.sh"
 grep -Fxq youtube "$root/openwrt/files/etc/ikev2-site-link/services.selected.txt"
+
+for dependency in ip-full strongswan-charon strongswan-mod-eap-mschapv2 \
+	strongswan-mod-kernel-netlink openssl-util curl; do
+	grep -Fq "+$dependency" "$root/Makefile"
+	grep -Fq "$dependency" "$root/scripts/build-apk.sh"
+done
 
 "$root/scripts/test-runtime.sh"
 "$root/scripts/test-policy.sh"
