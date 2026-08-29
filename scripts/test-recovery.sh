@@ -106,6 +106,9 @@ case "$*" in
 		[ -s "$SITE_LINK_TEST_NFT_STATE" ] || exit 1
 		echo 'meta mark set 0x10000 comment "IKEv2 Site Link: direct exit WAN"'
 		;;
+	'list chain inet fw4 forward')
+		echo 'jump forward_siteexit comment "!fw4: Handle siteexit IPv4/IPv6 forward traffic"'
+		;;
 	'list chain inet fw4 forward_siteexit')
 		echo 'jump accept_to_wan comment "!fw4: Accept siteexit to wan forwarding"'
 		;;
@@ -679,6 +682,10 @@ EOF
 cat >"$tmp/bin/nft-disable" <<'EOF'
 #!/bin/sh
 [ "$*" = 'list chain inet fw4 pbr_prerouting' ] && exit 0
+if [ "$*" = 'list chain inet fw4 forward' ]; then
+	echo 'jump forward_lan comment "!fw4: Handle lan IPv4/IPv6 forward traffic"'
+	exit 0
+fi
 case "$*" in 'list chain inet fw4 '*) exit 0 ;; *) exit 1 ;; esac
 EOF
 chmod 755 "$tmp/bin/uci-disable" "$tmp/bin/ip-disable" "$tmp/bin/swanctl-disable" \
@@ -935,6 +942,9 @@ case "$*" in
 		;;
 	'list chain inet fw4 pbr_prerouting')
 		echo 'meta mark set 0x10000 comment "IKEv2 Site Link: selected services"'
+		;;
+	'list chain inet fw4 forward')
+		echo 'jump forward_lan comment "!fw4: Handle lan IPv4/IPv6 forward traffic"'
 		;;
 	'list chain inet fw4 pbr_forward')
 		[ -s "$SITE_LINK_TEST_AUX_STATE" ] &&

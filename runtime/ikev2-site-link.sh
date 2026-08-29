@@ -170,6 +170,24 @@ pid_lock_release() {
 	rmdir "$dir" 2>/dev/null || true
 }
 
+process_start_identity() {
+	target_pid="$1"
+	[ -r "/proc/$target_pid/stat" ] || return 1
+	sed 's/^.*) //' "/proc/$target_pid/stat" 2>/dev/null |
+		awk 'NF >= 20 { print $20; exit }'
+}
+
+action_lock_owner_alive() {
+	owner_pid="$1"
+	[ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null || return 1
+	expected_start="$(sed -n 's/^pid_start=//p' "$action_lock_status" 2>/dev/null | tail -n1)"
+	# Locks from an older release have no start identity. A live PID remains the
+	# owner; age alone must never permit a concurrent package/routing mutation.
+	[ -n "$expected_start" ] || return 0
+	current_start="$(process_start_identity "$owner_pid" 2>/dev/null || true)"
+	[ -n "$current_start" ] && [ "$current_start" = "$expected_start" ]
+}
+
 action_lock_acquire() {
 	action="$1"
 	max_tries="${2:-${SITE_LINK_ACTION_LOCK_WAIT:-60}}"
@@ -177,11 +195,7 @@ action_lock_acquire() {
 	tries=0
 	while ! mkdir "$action_lock_dir" 2>/dev/null; do
 		pid="$(sed -n 's/^pid=//p' "$action_lock_status" 2>/dev/null | tail -n1)"
-		updated="$(sed -n 's/^updated=//p' "$action_lock_status" 2>/dev/null | tail -n1)"
-		now="$(date +%s)"
-		case "$updated" in '' | *[!0-9]*) updated=0 ;; esac
-		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null &&
-		   [ $((now - updated)) -le 3600 ]; then
+		if action_lock_owner_alive "$pid"; then
 			tries=$((tries + 1))
 			[ "$tries" -lt "$max_tries" ] || return 1
 			sleep 1
@@ -199,10 +213,12 @@ action_lock_acquire() {
 		rmdir "$action_lock_dir" 2>/dev/null || true
 	done
 	action_lock_owned=1
+	pid_start="$(process_start_identity "$$" 2>/dev/null || true)"
 	{
 		printf 'owner=site-link\n'
 		printf 'action_id=%s\n' "$action"
 		printf 'pid=%s\n' "$$"
+		printf 'pid_start=%s\n' "$pid_start"
 		printf 'updated=%s\n' "$(date +%s)"
 	} >"$action_lock_status.new.$$"
 	mv "$action_lock_status.new.$$" "$action_lock_status"
@@ -691,7 +707,9 @@ pbr_reload_checked() {
 	tries=0
 	while [ "$tries" -lt 30 ]; do
 		if "$pbr_init" running >/dev/null 2>&1 &&
-		   "$nft_bin" list chain inet fw4 pbr_prerouting >/dev/null 2>&1; then
+		   "$nft_bin" list chain inet fw4 pbr_prerouting >/dev/null 2>&1 &&
+		   "$nft_bin" list chain inet fw4 forward 2>/dev/null |
+			grep -Eq 'jump forward_[A-Za-z0-9_]+'; then
 			logger -t ikev2-pbr-action "end owner=site-link action=reload pid=$$" 2>/dev/null || true
 			return 0
 		fi
@@ -2079,12 +2097,14 @@ connect_source() {
 connect_impl() {
 	validate_config
 	[ "$(getv enabled 0)" = 1 ] || die 'site link is disabled'
+	if link_paused; then die 'site link is paused; resume it first'; fi
 	[ "$(role)" = source ] || die 'connect is valid only on the source router'
 	connect_source
 }
 
 apply_impl() {
 	use_candidate_config
+	log_state_transition apply
 	validate_config
 	if [ "$(getv enabled 0)" != 1 ]; then
 		disable_impl
@@ -2104,6 +2124,10 @@ apply_impl() {
 		secret_configured || die 'peer secret is not configured'
 		source_apply_transaction
 	fi
+	# Apply is an explicit request for the link to run, so it always clears a
+	# pause left from an earlier test.
+	uci set "$config_name.main.paused=0" || true
+	uci commit "$config_name" || true
 	"$site_init" enable >/dev/null 2>&1 || true
 	"$site_init" restart >/dev/null 2>&1 || true
 	if [ "$(role)" = source ]; then
@@ -2114,9 +2138,21 @@ apply_impl() {
 	fi
 }
 
+# Disable, Pause and Resume all change what the router does with live traffic.
+# Recording who asked turns "the link went down and nobody ran disable" into a
+# question the system log can answer.
+log_state_transition() {
+	transition="$1"
+	parent="$(cat "/proc/$PPID/comm" 2>/dev/null || echo unknown)"
+	logger -t ikev2-site-link \
+		"state transition=$transition role=$(role) pid=$$ ppid=$PPID parent=$parent" \
+		2>/dev/null || true
+}
+
 disable_impl() {
 	from_monitor=0
 	[ "${1:-}" != monitor ] || from_monitor=1
+	log_state_transition "disable${from_monitor:+ from_monitor=$from_monitor}"
 	cleanup_ok=1
 	# Teardown targets the last successfully applied snapshot. Candidate values
 	# may already contain a rejected role, interface or XFRM identifier.
@@ -2184,10 +2220,75 @@ disable_impl() {
 	rm -f "$probe_state" "$exit_traffic_state" "$set_dump4" "$set_dump6" \
 		"$persistent_set_dump4" "$persistent_set_dump6"
 	uci -q delete "$config_name.applied" || true
+	# A pause belongs to a configured link. Leaving the flag behind would make
+	# the next Apply look like a resume of state that no longer exists.
+	uci -q delete "$config_name.main.paused" || true
 	uci commit "$config_name" || cleanup_ok=0
 	"$site_init" disable >/dev/null 2>&1 || true
 	[ "$cleanup_ok" = 1 ] || die 'site link disabled but runtime cleanup is incomplete'
 	status_write disabled 'site link disabled'
+}
+
+link_paused() {
+	[ "$(getv paused 0)" = 1 ]
+}
+
+# Reversible stop, as opposed to Disable's complete teardown. The applied
+# snapshot, generated network and firewall sections, XFRM device and peer
+# secret all survive, so Resume needs no form input and repeats the exact
+# configuration that was already verified. Selected traffic returns to this
+# router's own WAN instead of reaching the fail-closed terminal route, which
+# is what testing without the link requires.
+pause_impl() {
+	use_applied_config || die 'no applied configuration exists'
+	[ "$(getv enabled 0)" = 1 ] || die 'site link is not enabled'
+	log_state_transition pause
+	paused_ok=1
+	# Stop procd first: an iteration already in flight would otherwise repair
+	# the state this function is releasing.
+	"$site_init" stop >/dev/null 2>&1 || paused_ok=0
+	uci set "$config_name.main.paused=1" || paused_ok=0
+	uci commit "$config_name" || paused_ok=0
+	if [ "$(role)" = source ]; then
+		# PBR's own enable flag rather than deleting the policy: the definition
+		# survives, so Resume restores the classifier that was already verified
+		# instead of rebuilding it from candidate configuration.
+		uci set pbr.ikev2_site_link.enabled=0 || paused_ok=0
+		uci commit pbr || paused_ok=0
+		pbr_reload_checked || paused_ok=0
+	fi
+	swanctl --terminate --ike site-link --timeout 5 >/dev/null 2>&1 || true
+	swanctl --terminate --ike site-link-in --timeout 5 >/dev/null 2>&1 || true
+	# Health evidence from before the pause must not satisfy the first check
+	# after Resume.
+	rm -f "$probe_state" "$exit_traffic_state"
+	[ "$paused_ok" = 1 ] ||
+		die 'site link paused but some runtime state was not released'
+	status_write paused 'site link paused; selected traffic uses this router'
+}
+
+resume_impl() {
+	use_applied_config || die 'no applied configuration exists'
+	[ "$(getv enabled 0)" = 1 ] || die 'site link is not enabled'
+	link_paused || die 'site link is not paused'
+	log_state_transition resume
+	uci set "$config_name.main.paused=0" || die 'unable to clear the paused state'
+	uci commit "$config_name" || die 'unable to clear the paused state'
+	if [ "$(role)" = source ]; then
+		uci set pbr.ikev2_site_link.enabled=1 ||
+			die 'unable to re-enable the site link routing policy'
+		uci commit pbr || die 'unable to re-enable the site link routing policy'
+		pbr_reload_checked || die 'site link routing policy did not reload'
+	fi
+	"$site_init" enable >/dev/null 2>&1 || true
+	"$site_init" restart >/dev/null 2>&1 || true
+	if [ "$(role)" = source ]; then
+		connect_source || true
+		probe_save 1
+		status_write ok 'site link resumed'
+	else
+		status_write idle 'site link resumed; waiting for peer traffic'
+	fi
 }
 
 status_write() {
@@ -2279,6 +2380,10 @@ status_emit() {
 		else
 			printf 'state=degraded\ndetail=disable cleanup is incomplete\n'
 		fi
+	elif link_paused; then
+		# A pause is an operator decision, not a fault. Reporting it as its own
+		# state keeps a deliberate test from looking like an outage.
+		printf 'state=paused\ndetail=site link paused; selected traffic uses this router\n'
 	elif [ "$current_role" = source ]; then
 		if source_control_ready && probe_recent_success; then
 			printf 'state=ok\ndetail=control plane and bidirectional data plane are healthy\n'
@@ -2336,6 +2441,14 @@ monitor_loop() {
 				# background monitor perform that transaction; require explicit Apply.
 				status_write degraded 'disabled configuration still has runtime state; apply Disable manually'
 			fi
+			[ "${SITE_LINK_MONITOR_ONCE:-0}" = 1 ] && break
+			monitor_wait 30
+			continue
+		fi
+		if link_paused; then
+			# The pause is deliberate. Repairing the SA, classifier or auxiliary
+			# rules here would undo exactly what the operator asked for.
+			status_write paused 'site link paused; selected traffic uses this router'
 			[ "${SITE_LINK_MONITOR_ONCE:-0}" = 1 ] && break
 			monitor_wait 30
 			continue
@@ -2468,16 +2581,26 @@ case "${1:-}" in
 	sources) sources_emit ;;
 	zones) zones_emit ;;
 	disable) with_lock disable disable_impl ;;
+	pause) with_lock pause pause_impl ;;
+	resume) with_lock resume resume_impl ;;
 	connect) use_applied_config || die 'no applied configuration exists'; with_lock connect connect_impl ;;
 	secret-set) with_lock secret-set consume_secret_input "${2:-}" ;;
 	secret-activate) with_lock secret-activate activate_secret_impl ;;
 	secret-rollback) with_lock secret-rollback rollback_secret_impl ;;
 	migrate-applied) with_lock migrate-applied migrate_applied_impl ;;
-	policy-reload) use_applied_config || exit 0; with_lock policy-reload policy_reload_impl ;;
-	policy-check) use_applied_config || exit 0; policy_check ;;
+	policy-reload)
+		use_applied_config || exit 0
+		if link_paused; then exit 0; fi
+		with_lock policy-reload policy_reload_impl
+		;;
+	policy-check)
+		use_applied_config || exit 0
+		if link_paused; then exit 0; fi
+		policy_check
+		;;
 	status) status_emit ;;
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;
 	render) if [ "$(role)" = exit ]; then render_exit; else render_source; fi ;;
-	*) die 'usage: ikev2-site-link {apply|disable|connect|secret-set TOKEN|secret-activate|secret-rollback|migrate-applied|policy-reload|policy-check|status|check|sources|zones|monitor|render}' ;;
+	*) die 'usage: ikev2-site-link {apply|pause|resume|disable|connect|secret-set TOKEN|secret-activate|secret-rollback|migrate-applied|policy-reload|policy-check|status|check|sources|zones|monitor|render}' ;;
 esac

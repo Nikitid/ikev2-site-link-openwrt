@@ -149,7 +149,18 @@ for site_link_family in 4 6; do
 	case "$site_link_saved" in '' | *[!0-9]*) continue ;; esac
 	[ $((site_link_now - site_link_saved)) -ge 0 ] || continue
 	[ $((site_link_now - site_link_saved)) -le "$site_link_dump_max_age" ] || continue
-	site_link_elements="$(tr '\n' ',' <"$site_link_dump" | sed 's/,$//')"
+	# IKEv2 Manager answers its own selected domains from 198.18.0.0/15. Such an
+	# address must never re-enter this classifier: routing it to the peer sends
+	# traffic to a synthetic destination the peer cannot reach, while every
+	# health signal still reports success. The policy build already refuses an
+	# overlapping selection; this keeps a snapshot taken before that check from
+	# reintroducing one.
+	if [ "$site_link_family" = 4 ]; then
+		site_link_elements="$(grep -Ev '^198\.(18|19)\.' "$site_link_dump" 2>/dev/null |
+			tr '\n' ',' | sed 's/,$//')"
+	else
+		site_link_elements="$(tr '\n' ',' <"$site_link_dump" | sed 's/,$//')"
+	fi
 	[ -n "$site_link_elements" ] &&
 		"$site_link_nft" add element inet fw4 "$site_link_restore_set" \
 			"{ $site_link_elements }" 2>/dev/null || true

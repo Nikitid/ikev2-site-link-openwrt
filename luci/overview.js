@@ -57,21 +57,24 @@ function statusPanel(status) {
 	var connected = status.sa === 'connected';
 	var healthy = status.state === 'ok';
 	var disabled = status.state === 'disabled';
+	var paused = status.state === 'paused';
 	var role = status.role === 'exit' ? _('Exit router') : _('Source router');
 	var health = healthy ? _('Healthy') : (status.state === 'idle' ? _('Waiting') :
-		(disabled ? _('Disabled') : _('Needs attention')));
+		(paused ? _('Paused') : (disabled ? _('Disabled') : _('Needs attention'))));
 	var detail = status.detail || _('Live state has not been reported yet.');
 	var applied = status.applied === '1' && status.configuration === 'applied';
 	return E('div', {}, [
 		E('div', { 'class': 'ikev2-hero' }, [
 			E('div', {}, [
-				E('h3', {}, [ connected ? _('Site link is connected') : _('Site link is not connected') ]),
+				E('h3', {}, [ paused ? _('Site link is paused') :
+					(connected ? _('Site link is connected') : _('Site link is not connected')) ]),
 				E('p', {}, [ detail ])
 			]),
 			E('div', { 'class': 'ikev2-hero-side' }, [
 				common.pill(applied ? _('Applied') : _('Prepared'), applied ? 'good' : 'warn'),
 				common.pill(connected ? _('Tunnel online') : _('Tunnel offline'), connected ? 'good' : 'bad'),
-				common.pill(health, healthy ? 'good' : ((status.state === 'idle' || disabled) ? 'info' : 'warn'))
+				common.pill(health, healthy ? 'good' :
+					((status.state === 'idle' || disabled || paused) ? 'info' : 'warn'))
 			])
 		]),
 		E('div', { 'class': 'ikev2-grid' }, [
@@ -111,8 +114,10 @@ return view.extend({
 		var link = map.section(form.NamedSection, 'main', 'main', _('Link'));
 		link.addremove = false;
 
-		option = link.option(form.Flag, 'enabled', _('Enabled'));
-		option.rmempty = false;
+		// No "Enabled" checkbox here. Clearing it and pressing Apply used to run
+		// the complete teardown, which is not what an operator turning the link
+		// off for a test wants and cannot be undone from the form. Running state
+		// is changed by the explicit Pause, Resume and Disable actions instead.
 
 		option = link.option(form.ListValue, 'role', _('Role'));
 		option.value('source', _('Source router') + ' — ' + _('sends selected traffic out'));
@@ -150,7 +155,7 @@ return view.extend({
 		// One section for both roles: CBI has no section-level dependency, so
 		// separate per-role sections would leave an empty box on the router
 		// that does not use them. The options below hide themselves instead.
-		var sourceRole = map.section(form.NamedSection, 'main', 'main', _('Role settings'));
+		var sourceRole = map.section(form.NamedSection, 'main', 'main', _('Traffic'));
 		sourceRole.addremove = false;
 
 		// PBR takes "@device" selectors; offer the router's own devices and
@@ -190,8 +195,14 @@ return view.extend({
 		option.placeholder = '10.253.44.2';
 		option.description = _('One private IPv4 address for this link alone. It must not overlap either router\'s LAN or any VPN pool.');
 
-		var health = map.section(form.NamedSection, 'main', 'main', _('Monitoring'));
-		health.addremove = false;
+		// Tuning and resource naming share one section. Every option below has a
+		// working default and is read by the runtime whether or not it is shown,
+		// so grouping them keeps the page to three sections instead of five
+		// without hiding anything from the administrator.
+		var advanced = map.section(form.NamedSection, 'main', 'main',
+			_('Advanced — timings, interfaces and identifiers'));
+		advanced.addremove = false;
+		var health = advanced;
 
 		option = health.option(form.Value, 'monitor_interval', _('Monitor interval'));
 		option.value('15', '15 ' + _('seconds') + ' — ' + _('recommended'));
@@ -224,12 +235,6 @@ return view.extend({
 		option.datatype = 'range(15,3600)';
 		option.rmempty = false;
 		option.description = _('Minimum time between connection attempts. This prevents restart storms while the peer is unavailable.');
-
-		// Everything the runtime reads but the page never showed. These have
-		// working defaults and are rarely touched, so they live apart from the
-		// settings above rather than being hidden from the admin entirely.
-		var advanced = map.section(form.NamedSection, 'main', 'main', _('Interfaces and identifiers'));
-		advanced.addremove = false;
 
 		function zoneOption(name, title, fallback, description) {
 			var opt = advanced.option(form.Value, name, title);
@@ -339,6 +344,41 @@ return view.extend({
 			});
 		}
 
+		function runAction(verb, failure) {
+			return fs.exec(helper, [ verb ]).then(function(result) {
+				if (result.code)
+					throw new Error(result.stderr || failure);
+				window.location.reload();
+			});
+		}
+
+		// Disable is a complete teardown and cannot be undone from this page, so
+		// it asks first and points at Pause, which is what "turn it off for a
+		// moment" actually means.
+		function confirmDisable() {
+			return new Promise(function(resolve) {
+				ui.showModal(_('Disable site link'), [
+					E('p', {}, [ _('This removes the tunnel together with the network, firewall and routing configuration it generated, and discards the applied snapshot. The peer secret is kept. Turning the link back on afterwards needs a full Apply.') ]),
+					E('p', {}, [ _('To switch the link off temporarily, use Pause instead: it keeps everything configured and comes back in one click.') ]),
+					E('div', { 'class': 'right' }, [
+						E('button', {
+							'class': 'cbi-button',
+							'click': function() { ui.hideModal(); resolve(false); }
+						}, [ _('Cancel') ]),
+						' ',
+						E('button', {
+							'class': 'cbi-button cbi-button-negative',
+							'click': function() { ui.hideModal(); resolve(true); }
+						}, [ _('Disable') ])
+					])
+				]);
+			}).then(function(confirmed) {
+				if (!confirmed)
+					return null;
+				return runAction('disable', _('Unable to disable the site link.'));
+			});
+		}
+
 		function actionBar() {
 			var input = E('input', {
 				'type': 'password',
@@ -379,6 +419,42 @@ return view.extend({
 			]);
 		}
 
+		// Running state is its own control group, separate from the settings
+		// form: these act immediately and do not save the form.
+		function stateBar() {
+			var paused = status.state === 'paused';
+			var configured = status.applied === '1';
+			var buttons = [];
+			if (paused)
+				buttons.push(E('button', {
+					'class': 'cbi-button cbi-button-positive',
+					'disabled': configured ? null : 'disabled',
+					'click': ui.createHandlerFn(self, function() {
+						return runAction('resume', _('Unable to resume the site link.'));
+					})
+				}, [ _('Resume') ]));
+			else
+				buttons.push(E('button', {
+					'class': 'cbi-button cbi-button-action',
+					'disabled': configured ? null : 'disabled',
+					'click': ui.createHandlerFn(self, function() {
+						return runAction('pause', _('Unable to pause the site link.'));
+					})
+				}, [ _('Pause') ]));
+			buttons.push(E('button', {
+				'class': 'cbi-button cbi-button-negative',
+				'disabled': configured ? null : 'disabled',
+				'click': ui.createHandlerFn(self, confirmDisable)
+			}, [ _('Disable') ]));
+			return E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ _('Running state') ]),
+				E('p', { 'class': 'cbi-value-description' }, [ paused ?
+					_('The link is paused. Selected traffic is using this router\'s own connection; the tunnel, routing policy and peer secret stay configured.') :
+					_('Pause stops the tunnel and returns selected traffic to this router, keeping everything configured. Disable removes the link and its generated configuration.') ]),
+				E('div', { 'class': 'ikev2-actions' }, buttons)
+			]);
+		}
+
 		return map.render().then(function(node) {
 			return E('div', { 'class': 'ikev2-page' }, [
 				E('div', { 'class': 'ikev2-header' }, [
@@ -390,6 +466,7 @@ return view.extend({
 					])
 				]),
 				statusPanel(status),
+				stateBar(),
 				node,
 				actionBar()
 			]);
