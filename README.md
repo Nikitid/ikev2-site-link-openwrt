@@ -78,10 +78,26 @@ ordinary main-table default.
   restart path;
 - no strongSwan-wide clear/reload during disable; the link never owns other
   applications' connections or credentials;
+- a policy whose domains are already routed by IKEv2 Manager is refused: such a
+  domain is answered from a FakeIP range, which would fill this classifier with
+  synthetic addresses and break both routes while every health signal still
+  reported success. Snapshot restores drop that range for the same reason;
+- every live-traffic state transition records its invoking process in the system
+  log, so an unexplained teardown can be attributed afterwards;
 - package removal refuses to continue if managed routing cannot be disabled;
 - explicit Disable performs a complete role-independent teardown, including
   both profiles, SAs, XFRM devices, policy rules and cached DNS-set state;
   the monitor reports incomplete teardown but never mutates global UCI/PBR;
+- Pause is the reversible alternative to Disable. It terminates the SAs, stops
+  the monitor and clears PBR's own enable flag on the site-link policy, so
+  selected traffic returns to this router's WAN instead of reaching the
+  fail-closed terminal route. The applied snapshot, generated network,
+  firewall and routing sections, XFRM device and peer secret are all retained,
+  so Resume restores the configuration that was already verified without any
+  form input. The monitor performs no repair while the link is paused, and
+  Apply clears the pause. Running state is changed only by these explicit
+  actions; the settings form has no enable checkbox that could turn a save
+  into a teardown;
 - peer secrets are write-only in LuCI and are never stored in UCI; replacement
   secrets are staged, activated on the exit without terminating the live SA,
   then activated and authenticated on the source with automatic local rollback;

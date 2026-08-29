@@ -32,6 +32,8 @@
 				"/tmp/ikev2-site-link-service-input-*.cidrs": [ "write" ],
 				"/usr/libexec/ikev2-site-link apply": [ "exec" ],
 				"/usr/libexec/ikev2-site-link disable": [ "exec" ],
+				"/usr/libexec/ikev2-site-link pause": [ "exec" ],
+				"/usr/libexec/ikev2-site-link resume": [ "exec" ],
 				"/usr/libexec/ikev2-site-link connect": [ "exec" ],
 				"/usr/libexec/ikev2-site-link secret-set *": [ "exec" ],
 				"/usr/libexec/ikev2-site-link secret-activate": [ "exec" ],

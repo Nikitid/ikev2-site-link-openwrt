@@ -6,6 +6,10 @@ manual_file="${SITE_LINK_POLICY_MANUAL_FILE:-/etc/ikev2-site-link/domains.manual
 manual_cidr_file="${SITE_LINK_POLICY_MANUAL_CIDR_FILE:-/etc/ikev2-site-link/addresses.manual.txt}"
 selected_file="${SITE_LINK_POLICY_SELECTED_FILE:-/etc/ikev2-site-link/services.selected.txt}"
 final_file="${SITE_LINK_POLICY_FINAL_FILE:-/etc/ikev2-site-link/domains.txt}"
+# The active domain list of IKEv2 Manager, when that application is installed.
+# Site Link does not depend on it; the file is read only to refuse a selection
+# both applications would claim.
+manager_domains_file="${SITE_LINK_MANAGER_DOMAINS_FILE:-/etc/pbr-ikev2-domains.txt}"
 cidr_file="${SITE_LINK_POLICY_CIDR_FILE:-/etc/ikev2-site-link/addresses.txt}"
 catalog_file="${SITE_LINK_POLICY_CATALOG_FILE:-/usr/share/ikev2-site-link/services/community-services}"
 subnet_catalog_file="${SITE_LINK_POLICY_SUBNET_CATALOG_FILE:-/etc/ikev2-site-link/community-subnet-services}"
@@ -660,6 +664,22 @@ apply_once() {
 		echo "combined domain list exceeds resource limits: $domain_count entries, $final_bytes bytes" >&2
 		rm -rf "$work"
 		return 1
+	fi
+
+	# IKEv2 Manager answers its own selected domains from a FakeIP range, and PBR
+	# fills this classifier from whatever the resolver returned. A domain claimed
+	# by both applications therefore puts a synthetic address into the site-link
+	# set, and traffic for it is routed to a peer that cannot reach it. Both
+	# routes break while every health signal still reports success, so the
+	# overlap is refused here rather than diagnosed later.
+	if [ -s "$manager_domains_file" ] && [ -s "$work/final" ]; then
+		if grep -Fx -f "$work/final" "$manager_domains_file" >"$work/overlap" 2>/dev/null &&
+		   [ -s "$work/overlap" ]; then
+			echo "domains are already routed by IKEv2 Manager: $(tr '\n' ' ' <"$work/overlap")" >&2
+			echo 'remove them from one application before applying' >&2
+			rm -rf "$work"
+			return 1
+		fi
 	fi
 
 	if [ -e "$final_file" ] && [ -e "$cidr_file" ] &&

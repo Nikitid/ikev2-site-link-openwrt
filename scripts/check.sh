@@ -41,6 +41,12 @@ if grep -Fq '(set -e;' "$root/runtime/ikev2-site-link.sh"; then
 	exit 1
 fi
 grep -Fq 'date -r "$action_lock_dir" +%s' "$root/runtime/lib/actions.sh"
+grep -Fq 'pid_start=' "$root/runtime/ikev2-site-link.sh"
+if grep -Eq 'now - updated.*3600' \
+	"$root/runtime/ikev2-site-link.sh" "$root/runtime/lib/actions.sh"; then
+	echo 'live global lock still expires by wall-clock age' >&2
+	exit 1
+fi
 grep -Fq 'date -r "$site_link_dump" +%s' "$root/runtime/pbr.user.site-link"
 if grep -Fq 'file_stamp()' "$root/runtime/ikev2-site-link.sh"; then
 	echo 'certificate cache still depends on file metadata' >&2
@@ -51,6 +57,8 @@ if grep -Fq '"$pbr_init" reload >/dev/null || return 1' \
 	echo 'PBR reload still trusts the init-script exit code' >&2
 	exit 1
 fi
+grep -Fq "grep -Eq 'jump forward_[A-Za-z0-9_]+'" \
+	"$root/runtime/ikev2-site-link.sh"
 grep -Fq '/var/run/ikev2-action.lock' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'routes-only' "$root/runtime/pbr.user.site-link"
 if grep -Fq 'ikev2-site-link.main.' "$root/runtime/pbr.user.site-link"; then
@@ -98,10 +106,56 @@ grep -Fq 'option.write = function(section_id, value)' "$root/luci/overview.js"
 grep -Fq "fs.exec(helper, [ 'sources' ])" "$root/luci/overview.js"
 grep -Fq '"/usr/libexec/ikev2-site-link sources"' "$root/luci/acl.json"
 grep -Fq '"/usr/libexec/ikev2-site-link zones"' "$root/luci/acl.json"
+grep -Fq '"/usr/libexec/ikev2-site-link pause"' "$root/luci/acl.json"
+grep -Fq '"/usr/libexec/ikev2-site-link resume"' "$root/luci/acl.json"
+
+# Running state is changed by explicit actions. An "Enabled" checkbox on the
+# settings form made Apply run the irreversible teardown.
+if grep -Fq "form.Flag, 'enabled'" "$root/luci/overview.js"; then
+	echo 'overview must not expose enabled as a form flag' >&2
+	exit 1
+fi
+grep -Fq "runAction('pause'" "$root/luci/overview.js"
+grep -Fq "runAction('resume'" "$root/luci/overview.js"
+grep -Fq "runAction('disable'" "$root/luci/overview.js"
+grep -Fq 'function confirmDisable(' "$root/luci/overview.js"
+
+# Every live-traffic state transition is attributable in the system log.
+grep -Fq 'log_state_transition()' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'log_state_transition "disable' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'log_state_transition pause' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'log_state_transition resume' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'log_state_transition apply' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'zones) zones_emit ;;' "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'sources) sources_emit ;;' "$root/runtime/ikev2-site-link.sh"
-grep -Fq 'policy-reload) use_applied_config || exit 0; with_lock policy-reload policy_reload_impl ;;' "$root/runtime/ikev2-site-link.sh"
+# policy-reload and policy-check must refuse to touch PBR without an applied
+# snapshot, and must stay inert while the link is paused.
+sed -n '/^	policy-reload)/,/;;/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'use_applied_config || exit 0'
+sed -n '/^	policy-reload)/,/;;/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'if link_paused; then exit 0; fi'
+sed -n '/^	policy-check)/,/;;/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'if link_paused; then exit 0; fi'
 grep -Fq 'monitor) monitor_loop ;;' "$root/runtime/ikev2-site-link.sh"
+
+# Pause is a reversible stop: it must never delete the applied snapshot or the
+# generated routing configuration, and the monitor must not repair through it.
+grep -Fq 'pause) with_lock pause pause_impl ;;' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'resume) with_lock resume resume_impl ;;' "$root/runtime/ikev2-site-link.sh"
+if sed -n '/^pause_impl()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Eq 'all_uci_remove|delete .*\.applied|delete_xfrm_candidate'; then
+	echo 'pause must not perform disable teardown' >&2
+	exit 1
+fi
+sed -n '/^pause_impl()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'uci set pbr.ikev2_site_link.enabled=0'
+sed -n '/^resume_impl()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'uci set pbr.ikev2_site_link.enabled=1'
+sed -n '/^monitor_loop()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'if link_paused; then'
+# Disable stays the complete teardown and must clear the pause flag with it.
+sed -n '/^disable_impl()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Fq 'uci -q delete "$config_name.main.paused"'
 grep -Fq "use_applied_config || die 'no applied configuration exists'" "$root/runtime/ikev2-site-link.sh"
 grep -Fq 'ikev2-site-link.applied.enabled' "$root/runtime/ikev2-site-link.init"
 grep -Fq 'ikev2-site-link.applied.role' "$root/runtime/90-ikev2-site-link"
@@ -126,6 +180,15 @@ fi
 grep -Fq 'user_services_dir="${SITE_LINK_POLICY_USER_SERVICES_DIR:-/etc/ikev2-site-link/services.d}"' \
 	"$root/runtime/ikev2-site-link-policy.sh"
 grep -Fxq youtube "$root/openwrt/files/etc/ikev2-site-link/services.selected.txt"
+
+# A domain claimed by both applications poisons this classifier with IKEv2
+# Manager's FakeIP addresses, so the policy build refuses the overlap.
+grep -Fq 'manager_domains_file="${SITE_LINK_MANAGER_DOMAINS_FILE:-/etc/pbr-ikev2-domains.txt}"' \
+	"$root/runtime/ikev2-site-link-policy.sh"
+grep -Fq 'domains are already routed by IKEv2 Manager' \
+	"$root/runtime/ikev2-site-link-policy.sh"
+# A snapshot taken before that check must not reintroduce FakeIP addresses.
+grep -Fq "grep -Ev '^198\\.(18|19)\\.'" "$root/runtime/pbr.user.site-link"
 
 for dependency in ip-full strongswan-charon strongswan-mod-eap-mschapv2 \
 	strongswan-mod-kernel-netlink openssl-util curl; do
