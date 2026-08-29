@@ -48,6 +48,14 @@ Cheap runtime drift (XFRM device, VIP, peer route and owned auxiliary nftables
 rules) is reconciled under the shared action lock. Managed UCI, firewall and PBR
 drift is reported as degraded and requires an explicit Apply; the background
 monitor never starts a forwarding-disruptive PBR rebuild.
+Status also samples one address from the live classifier and tries to reach it
+through the tunnel. Destinations are resolved on the source but connected from
+the exit, so a CDN cache inside the source operator's network can be
+unreachable from the exit while the SA, the classifier and the ordinary probe
+all look healthy. The result is reported as `classifier_reachable`; it is
+telemetry and never triggers a reconnect, because one unreachable cache node is
+not a reason to tear down a working tunnel.
+
 The source installs one narrow RPDB rule for locally generated sockets bound to
 its XFRM device, so the HTTPS probe uses the PBR table instead of the router's
 ordinary main-table default.

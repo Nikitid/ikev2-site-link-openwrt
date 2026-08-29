@@ -1667,6 +1667,47 @@ data_plane_ready() {
 	return 1
 }
 
+# The classifier is filled from addresses resolved on this router, but the
+# connection is made from the exit. For a CDN with caches inside operator
+# networks - which is exactly what the default YouTube selection reaches - the
+# address that is closest here can be one the exit cannot reach at all. The
+# ordinary probe uses a fixed hostname and would not notice, so sample the live
+# classifier instead. This is telemetry: it never drives a reconnect, because a
+# single unreachable cache node is not a reason to tear down a working tunnel.
+classifier_sample() {
+	local dump
+	for dump in "$set_dump4" "$persistent_set_dump4"; do
+		[ -s "$dump" ] || continue
+		awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }' "$dump" 2>/dev/null
+		return 0
+	done
+	return 0
+}
+
+classifier_reachable() {
+	local device address
+	[ "$(role)" = source ] || return 2
+	command -v curl >/dev/null 2>&1 || return 2
+	address="$(classifier_sample)"
+	[ -n "$address" ] || return 2
+	device="$(getv xfrm_device ipsec-home)"
+	valid_device "$device" || return 2
+	# Identity does not matter here, only whether the exit can open the
+	# connection at all, so certificate validation is deliberately skipped.
+	curl -4 -s -k -o /dev/null --interface "$device" \
+		--connect-timeout 3 --max-time 6 "https://$address/" 2>/dev/null
+}
+
+classifier_reach_state() {
+	local rc=0
+	classifier_reachable || rc=$?
+	case "$rc" in
+		0) printf 'verified\n' ;;
+		2) printf 'unknown\n' ;;
+		*) printf 'unreachable\n' ;;
+	esac
+}
+
 probe_due() {
 	now="$1"
 	last="$(sed -n 's/^last=//p' "$probe_state" 2>/dev/null | tail -n1)"
@@ -2338,6 +2379,7 @@ status_emit() {
 		printf 'fail_closed=%s\n' "$(source_ipv4_terminal_ready && source_ipv6_terminal_ready &&
 			guard_route_ready &&
 			echo active || echo missing)"
+		printf 'classifier_reachable=%s\n' "$(classifier_reach_state)"
 		printf 'route=%s\npbr=%s\nguard=%s\ndata_plane=%s\ntunnel_data_plane=%s\nclassifier=%s\nclient_forwarding=%s\n' \
 			"$(source_routes_ready && echo healthy || echo missing)" \
 			"$(source_pbr_ready && source_aux_rules_ready && echo healthy || echo missing)" \

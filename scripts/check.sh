@@ -90,20 +90,52 @@ node -e 'new Function("window", "document", "L", "baseclass", require("fs").read
 	"$root/luci/shared.js"
 
 "$root/scripts/test-policy-ui.sh"
+"$root/scripts/test-overview-ui.sh"
 
 # LuCI require() rejects any module whose factory does not return a Class subclass.
 grep -q "^'require baseclass';" "$root/luci/shared.js"
 grep -q 'return baseclass.extend(' "$root/luci/shared.js"
 
+# The overview is built from the shared design system, like every other page in
+# this application. Stock CBI produced a layout that did not match the rest and
+# silently reset a select whose stored value was not among its choices.
+if grep -Fq 'form.Map' "$root/luci/overview.js"; then
+	echo 'overview must not use CBI' >&2
+	exit 1
+fi
+grep -Fq 'common.section(' "$root/luci/overview.js"
+grep -Fq 'common.fieldLabel(' "$root/luci/overview.js"
+grep -Fq "class': 'ikev2-form-grid'" "$root/luci/overview.js"
+# A stored value outside the offered choices must survive a render.
+grep -Fq 'if (!seen && value)' "$root/luci/overview.js"
+
 # Source selectors are offered from the router's own devices, and the list is
-# stored as one space-separated UCI option, so both overrides must stay.
-grep -Fq "section.option(form.DynamicList, 'source_devices'" \
-	"$root/luci/overview.js" ||
-	grep -Fq "sourceRole.option(form.DynamicList, 'source_devices'" \
-		"$root/luci/overview.js"
-grep -Fq 'option.cfgvalue = function(section_id)' "$root/luci/overview.js"
-grep -Fq 'option.write = function(section_id, value)' "$root/luci/overview.js"
+# stored as one space-separated UCI option.
 grep -Fq "fs.exec(helper, [ 'sources' ])" "$root/luci/overview.js"
+grep -Fq "uci.set(config, 'main', 'source_devices', chips.values().join(' '))" \
+	"$root/luci/overview.js"
+
+# Interface names and XFRM identifiers are fixed defaults, not settings: editing
+# one requires a Disable first, so the page must not offer them.
+grep -Fq 'var fixedDefaults' "$root/luci/overview.js"
+
+# A destination resolved here can be a cache the exit cannot reach. Sample the
+# live classifier through the tunnel and report it; never reconnect on it.
+grep -Fq 'classifier_reachable()' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'classifier_reach_state()' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'classifier_reachable=%s' "$root/runtime/ikev2-site-link.sh"
+grep -Fq 'status.classifier_reachable' "$root/luci/overview.js"
+if sed -n '/^classifier_reachable()/,/^}/p' "$root/runtime/ikev2-site-link.sh" |
+	grep -Eq 'connect_source|reconnect|swanctl'; then
+	echo 'classifier reachability must stay telemetry' >&2
+	exit 1
+fi
+for identifier in if_id xfrm_device exit_if_id exit_device; do
+	if grep -Fq "common.fieldLabel(_('$identifier" "$root/luci/overview.js"; then
+		echo "overview must not expose $identifier as a setting" >&2
+		exit 1
+	fi
+done
 grep -Fq '"/usr/libexec/ikev2-site-link sources"' "$root/luci/acl.json"
 grep -Fq '"/usr/libexec/ikev2-site-link zones"' "$root/luci/acl.json"
 grep -Fq '"/usr/libexec/ikev2-site-link pause"' "$root/luci/acl.json"
@@ -115,10 +147,12 @@ if grep -Fq "form.Flag, 'enabled'" "$root/luci/overview.js"; then
 	echo 'overview must not expose enabled as a form flag' >&2
 	exit 1
 fi
-grep -Fq "runAction('pause'" "$root/luci/overview.js"
-grep -Fq "runAction('resume'" "$root/luci/overview.js"
-grep -Fq "runAction('disable'" "$root/luci/overview.js"
-grep -Fq 'function confirmDisable(' "$root/luci/overview.js"
+grep -Fq "runHelper(pauseButton, 'pause'" "$root/luci/overview.js"
+grep -Fq "runHelper(pauseButton, 'resume'" "$root/luci/overview.js"
+grep -Fq "runHelper(disableButton, 'disable'" "$root/luci/overview.js"
+# Disable is irreversible from this page, so it must ask and must point at Pause.
+grep -Fq 'ui.showModal(_(' "$root/luci/overview.js"
+grep -Fq 'use Pause instead' "$root/luci/overview.js"
 
 # Every live-traffic state transition is attributable in the system log.
 grep -Fq 'log_state_transition()' "$root/runtime/ikev2-site-link.sh"
