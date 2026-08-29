@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 - 2026-08-30
+
+- Rebuilt the overview on the application's own design system instead of stock
+  CBI, so it matches every other page. A select whose stored value was outside
+  its choices used to render as unset and be rewritten by the next save; the
+  value is now preserved.
+- Reduced the page to Link, Traffic and one advanced group. Interface names and
+  XFRM identifiers are no longer settings: they exist only to avoid colliding
+  with IKEv2 Manager, the runtime already refuses a conflict, and changing one
+  requires a Disable first.
+- Reported whether a sampled classifier address can actually be reached through
+  the tunnel. Destinations are resolved on the source but connected from the
+  exit, so a CDN cache inside the source operator's network can be unreachable
+  from the exit while every other signal stays healthy. This is telemetry and
+  never triggers a reconnect.
+- Added a render harness that executes the page against a stubbed LuCI
+  environment, because a parse check passes while a page dies at render time.
+
 ## 0.4.0 - 2026-08-29
 
 - Split the single off switch into Pause and Disable. Pause is reversible: it
