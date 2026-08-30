@@ -12,6 +12,7 @@
 				"/usr/libexec/ikev2-site-link check": [ "exec" ],
 				"/usr/libexec/ikev2-site-link sources": [ "exec" ],
 				"/usr/libexec/ikev2-site-link zones": [ "exec" ],
+				"/usr/libexec/ikev2-site-link networks": [ "exec" ],
 				"/usr/libexec/ikev2-site-link-policy services": [ "exec" ],
 				"/usr/libexec/ikev2-site-link-policy service-read *": [ "exec" ],
 				"/usr/libexec/ikev2-site-link-policy status *": [ "exec" ]

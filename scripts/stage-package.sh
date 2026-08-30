@@ -15,6 +15,13 @@ put() {
 	install -m "$mode" "$root/$source" "$target"
 }
 
+# The page shows which build is installed. Stamping it at packaging time keeps
+# status cheap: no package-manager query on every poll.
+. "$root/release.env"
+mkdir -p "$stage/usr/share/ikev2-site-link"
+printf '%s\n' "$PKG_VERSION" >"$stage/usr/share/ikev2-site-link/version"
+chmod 644 "$stage/usr/share/ikev2-site-link/version"
+
 put 600 openwrt/files/etc/config/ikev2-site-link /etc/config/ikev2-site-link
 put 600 openwrt/files/etc/ikev2-site-link/youtube-domains.txt /etc/ikev2-site-link/youtube-domains.txt
 put 600 openwrt/files/etc/ikev2-site-link/domains.txt /etc/ikev2-site-link/domains.txt

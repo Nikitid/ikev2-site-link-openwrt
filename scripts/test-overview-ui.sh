@@ -125,6 +125,7 @@ const status = [
 	'interface=siteexit', 'rx_bytes=426344448', 'tx_bytes=7122780160',
 	'tunnel_data_plane=unverified', 'vip=10.253.44.2', 'fail_closed=not-applicable',
 	'classifier=healthy', 'client_forwarding=configured', 'secret=configured',
+	'secret_pending=staged', 'version=0.7.0',
 	'detail=exit route is protected; waiting for peer'
 ].join('\n');
 
@@ -133,7 +134,8 @@ try {
 	page = view.render([
 		{ code: 0, stdout: status }, null,
 		{ code: 0, stdout: 'br-lan=LAN\nipsec-in=VPN clients' },
-		{ code: 0, stdout: 'lan=LAN\nwan=WAN' }
+		{ code: 0, stdout: 'lan=LAN\nwan=WAN' },
+		{ code: 0, stdout: 'lan=static\nwan=dhcp' }
 	]);
 } catch (error) {
 	fail('render() threw: ' + (error && error.stack ? error.stack : error));
