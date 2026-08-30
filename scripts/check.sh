@@ -91,6 +91,7 @@ node -e 'new Function("window", "document", "L", "baseclass", require("fs").read
 
 "$root/scripts/test-policy-ui.sh"
 "$root/scripts/test-overview-ui.sh"
+"$root/scripts/test-translations.sh"
 
 # LuCI require() rejects any module whose factory does not return a Class subclass.
 grep -q "^'require baseclass';" "$root/luci/shared.js"

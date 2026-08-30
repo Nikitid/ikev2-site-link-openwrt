@@ -133,13 +133,13 @@ function statusCards(status) {
 		common.card(_('Role'), role, status.interface || '—'),
 		common.card(_('Traffic'), '↓ ' + bytes(status.rx_bytes),
 			_('Sent: ') + bytes(status.tx_bytes)),
-		common.card(_('Tunnel data plane'), status.tunnel_data_plane || _('unverified'),
+		common.card(_('Tunnel data plane'), _(status.tunnel_data_plane || 'unverified'),
 			_('Tunnel address: ') + (status.vip || '—')),
 		common.card(_('Routing path'), status.fail_closed === 'active' ? _('Fail-closed') :
 			(status.role === 'exit' ? _('WAN only') : _('Unavailable')),
-			_('Classifier: ') + (status.classifier || '—') + ' · ' +
-			_('Reachable from exit: ') + (status.classifier_reachable || '—') + ' · ' +
-			_('Client forwarding: ') + (status.client_forwarding || '—'))
+			_('Classifier: ') + _(status.classifier || '—') + ' · ' +
+			_('Reachable from exit: ') + _(status.classifier_reachable || '—') + ' · ' +
+			_('Client forwarding: ') + _(status.client_forwarding || '—'))
 	]);
 }
 
@@ -149,7 +149,8 @@ return view.extend({
 			L.resolveDefault(fs.exec(helper, [ 'status' ]), { code: 1, stdout: '' }),
 			uci.load(config),
 			L.resolveDefault(fs.exec(helper, [ 'sources' ]), { code: 1, stdout: '' }),
-			L.resolveDefault(fs.exec(helper, [ 'zones' ]), { code: 1, stdout: '' })
+			L.resolveDefault(fs.exec(helper, [ 'zones' ]), { code: 1, stdout: '' }),
+			L.resolveDefault(fs.exec(helper, [ 'networks' ]), { code: 1, stdout: '' })
 		]);
 	},
 
@@ -158,6 +159,7 @@ return view.extend({
 		var status = parse(data[0] && data[0].stdout);
 		var sources = parseNamedValues(data[2] && data[2].stdout);
 		var zones = parseNamedValues(data[3] && data[3].stdout);
+		var networks = parseNamedValues(data[4] && data[4].stdout);
 		common.styles();
 
 		var paused = status.state === 'paused';
@@ -179,7 +181,11 @@ return view.extend({
 		var zoneChoices = zones.map(function(zone) {
 			return [ zone.name, zone.name + (zone.value ? ' — ' + zone.value : '') ];
 		});
-		var exitWan = textField('exit_wan', 'wan', { 'placeholder': 'wan' });
+		var networkChoices = networks.map(function(entry) {
+			return [ entry.name, entry.name + (entry.value ? ' — ' + entry.value : '') ];
+		});
+		var exitWan = selectField('exit_wan', 'wan',
+			networkChoices.length ? networkChoices : [ [ 'wan', 'wan' ] ]);
 		var exitWanZone = selectField('exit_wan_zone', 'wan',
 			zoneChoices.length ? zoneChoices : [ [ 'wan', 'wan' ] ]);
 		var exitPool = textField('exit_pool', '10.253.44.2', { 'placeholder': '10.253.44.2' });
@@ -244,13 +250,13 @@ return view.extend({
 				_('Network used to route Site Link traffic to the Internet.'), exitWan, 'exit'),
 			field(_('Exit WAN firewall zone'),
 				_('Zone used by the forwarding and dedicated-port rules.'), exitWanZone, 'exit'),
-			field(_('Dedicated tunnel address'),
-				_('One private IPv4 address for this link alone. It must not overlap either router\'s LAN or any VPN pool.'),
-				exitPool, 'exit'),
 			field(_('Tunnel MTU'),
 				_('Lower values cost throughput; higher ones risk fragmentation inside the tunnel.'), mtu)
 		];
 		var advancedFields = [
+			field(_('Dedicated tunnel address'),
+				_('One private IPv4 address for this link alone. The default is fine unless it collides with a LAN or VPN pool.'),
+				exitPool, 'exit'),
 			field(_('Monitor interval'), null, monitorInterval),
 			field(_('Data-plane probe interval'),
 				_('Use the same value on both routers.'), probeInterval),
@@ -389,10 +395,26 @@ return view.extend({
 			return button;
 		}
 
-		var stageButton = E('button', { 'class': 'cbi-button cbi-button-action' }, [ _('Stage replacement') ]);
+		var secretResult = common.inlineResult();
+		var stageButton = E('button', { 'class': 'cbi-button cbi-button-action' },
+			[ status.secret === 'configured' ? _('Stage replacement') : _('Set secret') ]);
+		// Activating or restoring a staged secret only means anything once one
+		// exists. Showing them permanently invited activating nothing.
+		var stagedActions = status.secret_pending && status.secret_pending !== 'none' ?
+			E('div', {}, [
+				E('p', { 'class': 'ikev2-panel-note' }, [
+					_('A replacement is staged. Activate it on the exit router first, then here.')
+				]),
+				E('div', { 'class': 'ikev2-actions end' }, [
+					secretButton(_('Activate staged'), 'secret-activate',
+						_('Activating...'), _('Unable to activate the staged secret.')),
+					secretButton(_('Restore previous'), 'secret-rollback',
+						_('Restoring...'), _('Unable to restore the previous secret.'), 'cbi-button-reset')
+				])
+			]) : '';
 		stageButton.addEventListener('click', ui.createHandlerFn(self, function() {
 			return common.runAction({
-				button: stageButton, result: result,
+				button: stageButton, result: secretResult,
 				busy: _('Storing the secret...'), failure: _('Unable to update the peer secret.'),
 				run: function() {
 					if (!secretInput.value)
@@ -404,7 +426,7 @@ return view.extend({
 							_('Unable to update the peer secret.'));
 					}).then(function() {
 						secretInput.value = '';
-						result.ok(status.secret === 'configured' ?
+						secretResult.ok(status.secret === 'configured' ?
 							_('Replacement staged. Activate the exit router first, then the source.') :
 							_('Initial peer secret configured.'));
 					});
@@ -422,6 +444,7 @@ return view.extend({
 			common.header(_('IKEv2 Site Link'),
 				_('Routes selected services between two OpenWrt routers over a monitored, fail-closed IKEv2 link.'),
 				[
+					status.version ? common.pill('v' + status.version, 'neutral') : '',
 					common.pill(applied ? _('Applied') : _('Prepared'), applied ? 'good' : 'warn'),
 					common.pill(paused ? _('Paused') : (connected ? _('Tunnel online') : _('Tunnel offline')),
 						paused ? 'neutral' : (connected ? 'good' : 'bad'))
@@ -439,17 +462,20 @@ return view.extend({
 				_('What enters the link on the source router, and how the exit router reaches the Internet.'),
 				grid(trafficFields)),
 			common.section(_('Peer secret'),
-				_('The secret is write-only. Initial setup activates it immediately. Later changes are staged: activate the exit first, then the source, which verifies the new credential and rolls back on failure.'),
-				E('div', { 'class': 'ikev2-form-grid' }, [
-					common.fieldLabel(_('New peer secret')), secretInput
+				status.secret === 'configured' ?
+					_('A secret is set. Entering a new one stages it: activate the exit router first, then the source, which verifies the new credential and rolls back on failure.') :
+					_('The shared secret this link authenticates with. It is write-only and is never shown again; the first one you enter is activated immediately.'),
+				E('div', {}, [
+					E('div', { 'class': 'ikev2-form-grid' }, [
+						common.fieldLabel(_('New peer secret'),
+							_('Leave empty to keep the current one.')),
+						secretInput
+					]),
+					E('div', { 'class': 'ikev2-actions end' }, [ secretResult.node, stageButton ]),
+					stagedActions
 				]),
-				E('div', { 'class': 'ikev2-actions' }, [
-					stageButton,
-					secretButton(_('Activate staged'), 'secret-activate',
-						_('Activating...'), _('Unable to activate the staged secret.')),
-					secretButton(_('Restore previous'), 'secret-rollback',
-						_('Restoring...'), _('Unable to restore the previous secret.'), 'cbi-button-reset')
-				])),
+				common.pill(status.secret === 'configured' ? _('Set') : _('Not set'),
+					status.secret === 'configured' ? 'good' : 'warn')),
 			E('details', { 'class': 'ikev2-section' }, [
 				E('summary', {}, [ E('strong', {}, [ _('Advanced — timings and reconnection') ]) ]),
 				E('p', { 'class': 'ikev2-subtitle', 'style': 'margin:.5rem 0 1rem' }, [
@@ -457,7 +483,7 @@ return view.extend({
 				]),
 				grid(advancedFields)
 			]),
-			E('div', { 'class': 'ikev2-actions bar' }, [ result.node, reconnectButton, applyButton ])
+			E('div', { 'class': 'ikev2-actions end' }, [ result.node, reconnectButton, applyButton ])
 		]);
 	},
 

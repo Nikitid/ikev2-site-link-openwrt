@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0 - 2026-08-30
+
+- Moved Reconnect and Apply to the right of the page, where every other action
+  in both applications sits.
+- Rebuilt the peer secret block. Three buttons were crowded into its heading and
+  the input was too narrow to read its own placeholder. The field now sits in the
+  form with the rest, the staging actions appear only once a replacement is
+  actually staged, and a pill says whether a secret is set at all.
+- Made the exit WAN a selector over the router's own networks. It was free text,
+  so a typo was only discovered at Apply.
+- Moved the dedicated tunnel address to the advanced group. It is an internal
+  /32 with a working default that nobody sets by hand.
+- Showed the installed package version beside the state, stamped at packaging
+  time so status stays cheap.
+- Translated the rest of the page, including the status words that came straight
+  from the runtime — `unverified`, `healthy`, `configured` — and added the same
+  translation check the other application uses.
+
 ## 0.6.0 - 2026-08-30
 
 - Renamed Disable to Remove link and said in the confirmation exactly what it

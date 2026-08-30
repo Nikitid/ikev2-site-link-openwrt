@@ -2414,6 +2414,8 @@ status_emit() {
 			"$(global_pbr_contract_ready && echo ready || echo missing)" \
 			"$(server_certificate_ready && echo ready || echo missing)"
 	fi
+	printf 'version=%s\n' \
+		"$(cat /usr/share/ikev2-site-link/version 2>/dev/null || echo unknown)"
 	updated="$(sed -n 's/^updated=//p' "$state_file" 2>/dev/null | tail -n1)"
 	[ -z "$updated" ] || printf 'updated=%s\n' "$updated"
 	if [ "$enabled" != 1 ]; then
@@ -2608,6 +2610,21 @@ sources_emit() {
 }
 
 # Firewall zones for the form, as "name=networks" lines.
+# UCI network interfaces, for the exit WAN selector. Typing a network name by
+# hand was the only way to set it, and a typo is only discovered at Apply.
+networks_emit() {
+	own="$(getv interface sitehome)"
+	exit_own="$(getv exit_interface siteexit)"
+	uci -q show network 2>/dev/null |
+		sed -n "s/^network\.\([^.=]*\)=interface$/\1/p" |
+		while IFS= read -r name; do
+			[ -n "$name" ] || continue
+			case "$name" in loopback | lo | "$own" | "$exit_own") continue ;; esac
+			printf '%s=%s\n' "$name" \
+				"$(uci -q get "network.$name.proto" 2>/dev/null || echo '')"
+		done
+}
+
 zones_emit() {
 	uci -q show firewall 2>/dev/null |
 		sed -n "s/^firewall\.\([^.]*\)\.name='\(.*\)'\$/\1 \2/p" |
@@ -2622,6 +2639,7 @@ case "${1:-}" in
 	apply) with_lock apply apply_impl ;;
 	sources) sources_emit ;;
 	zones) zones_emit ;;
+	networks) networks_emit ;;
 	disable) with_lock disable disable_impl ;;
 	pause) with_lock pause pause_impl ;;
 	resume) with_lock resume resume_impl ;;
@@ -2644,5 +2662,5 @@ case "${1:-}" in
 	check) validate_config; status_emit ;;
 	monitor) monitor_loop ;;
 	render) if [ "$(role)" = exit ]; then render_exit; else render_source; fi ;;
-	*) die 'usage: ikev2-site-link {apply|pause|resume|disable|connect|secret-set TOKEN|secret-activate|secret-rollback|migrate-applied|policy-reload|policy-check|status|check|sources|zones|monitor|render}' ;;
+	*) die 'usage: ikev2-site-link {apply|pause|resume|disable|connect|secret-set TOKEN|secret-activate|secret-rollback|migrate-applied|policy-reload|policy-check|status|check|sources|zones|networks|monitor|render}' ;;
 esac
