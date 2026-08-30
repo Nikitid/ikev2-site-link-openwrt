@@ -59,6 +59,7 @@ function E(tag, attrs, children) {
 }
 
 const documentStub = {
+	createTextNode(text) { const n = makeNode('#text', {}, []); n.textContent = String(text); return n; },
 	getElementById() { return null; },
 	head: { appendChild() {} },
 	createDocumentFragment() { return makeNode('fragment', {}, []); },
@@ -153,6 +154,15 @@ if (source.indexOf('if (!seen && value)') < 0)
 // Rendering must not write configuration; only Apply may.
 if (Object.keys(written).length)
 	fail('render() wrote UCI options: ' + Object.keys(written).join(', '));
+
+// A busy button must show that the action was accepted, not just go grey.
+const probe = makeNode('button', {}, []);
+common.setBusy(probe, true, 'Pausing...');
+if (!probe.disabled) fail('setBusy did not disable the button');
+if (!probe.children.some(function(c) { return c.attrs && c.attrs['class'] === 'ikev2-spin'; }))
+	fail('setBusy did not render a spinner');
+common.setBusy(probe, false);
+if (probe.disabled) fail('setBusy did not restore the button');
 
 process.stdout.write('overview UI render tests OK\n');
 JS

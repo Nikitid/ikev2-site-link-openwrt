@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-ikev2-site-link
-PKG_VERSION:=0.5.0
+PKG_VERSION:=0.6.0
 PKG_RELEASE:=
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=nikitid

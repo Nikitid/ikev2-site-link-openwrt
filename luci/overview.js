@@ -321,8 +321,17 @@ return view.extend({
 			return uci.save();
 		}
 
+		var reconnectButton = E('button', {
+			'class': 'cbi-button cbi-button-action',
+			'disabled': (applied && !paused && role.value === 'source') ? null : 'disabled'
+		}, [ _('Reconnect') ]);
+		reconnectButton.addEventListener('click', ui.createHandlerFn(self, function() {
+			return runHelper(reconnectButton, 'connect',
+				_('Reconnecting...'), _('Unable to reconnect the site link.'));
+		}));
+
 		var applyButton = E('button', { 'class': 'cbi-button cbi-button-apply' },
-			[ _('Apply and connect') ]);
+			[ _('Apply') ]);
 		applyButton.addEventListener('click', ui.createHandlerFn(self, function() {
 			return common.runAction({
 				button: applyButton, result: result,
@@ -346,25 +355,29 @@ return view.extend({
 				runHelper(pauseButton, 'pause', _('Pausing...'), _('Unable to pause the site link.'));
 		}));
 
+		// "Disable" read as a toggle, next to Pause which actually is one. This
+		// action deletes the tunnel and everything generated for it, so it is
+		// named for that.
 		var disableButton = E('button', {
 			'class': 'cbi-button cbi-button-negative',
 			'disabled': applied ? null : 'disabled'
-		}, [ _('Disable') ]);
+		}, [ _('Remove link') ]);
 		disableButton.addEventListener('click', ui.createHandlerFn(self, function() {
 			return new Promise(function(resolve) {
-				ui.showModal(_('Disable site link'), [
-					E('p', {}, [ _('This removes the tunnel together with the network, firewall and routing configuration it generated, and discards the applied snapshot. The peer secret is kept. Turning the link back on afterwards needs a full Apply.') ]),
-					E('p', {}, [ _('To switch the link off temporarily, use Pause instead: it keeps everything configured and comes back in one click.') ]),
+				ui.showModal(_('Remove the site link?'), [
+					E('p', {}, [ _('This deletes the tunnel and everything the application generated for it: the network interface, the firewall zone and forwardings, the routing policy and the saved applied state.') ]),
+					E('p', {}, [ _('The peer secret and your selected destinations are kept, but bringing the link back afterwards needs a full Apply on both routers.') ]),
+					E('p', {}, [ _('To switch the link off for a while, use Pause instead: it stops the tunnel, returns the traffic to this router and comes back in one click.') ]),
 					E('div', { 'class': 'right' }, [
 						E('button', { 'class': 'cbi-button', 'click': function() { ui.hideModal(); resolve(false); } }, [ _('Cancel') ]),
 						' ',
-						E('button', { 'class': 'cbi-button cbi-button-negative', 'click': function() { ui.hideModal(); resolve(true); } }, [ _('Disable') ])
+						E('button', { 'class': 'cbi-button cbi-button-negative', 'click': function() { ui.hideModal(); resolve(true); } }, [ _('Remove link') ])
 					])
 				]);
 			}).then(function(confirmed) {
 				if (!confirmed)
 					return null;
-				return runHelper(disableButton, 'disable', _('Disabling...'), _('Unable to disable the site link.'));
+				return runHelper(disableButton, 'disable', _('Removing...'), _('Unable to remove the site link.'));
 			});
 		}));
 
@@ -444,7 +457,7 @@ return view.extend({
 				]),
 				grid(advancedFields)
 			]),
-			E('div', { 'class': 'ikev2-actions end' }, [ result.node, applyButton ])
+			E('div', { 'class': 'ikev2-actions bar' }, [ result.node, reconnectButton, applyButton ])
 		]);
 	},
 

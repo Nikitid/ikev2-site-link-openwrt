@@ -83,13 +83,16 @@ const document = {
   documentElement: { lang: 'en' },
   getElementById: () => null,
   head: { appendChild: () => {} },
-  createDocumentFragment: () => ({})
+  createDocumentFragment: () => ({}),
+  // setBusy renders a spinner next to the label, so it needs text nodes.
+  createTextNode: (text) => ({ tagName: 'text', textContent: String(text) })
 };
 const window = { localStorage: { getItem: () => 'en' }, setTimeout };
 function E(tag, attrs, children) {
   return { tagName: String(tag).replace(/[^a-z]/gi, ''), dataset: {}, disabled: false,
     innerHTML: children ? String(children[0] || '') : '', textContent: children ? String(children[0] || '') : '',
-    style: {}, setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; } };
+    style: {}, children: [], setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; },
+    replaceChildren(...nodes) { this.children = nodes; } };
 }
 const common = new Function('window', 'document', 'L', 'baseclass', 'fs', 'E', source)(
   window, document, {}, { extend: value => value }, { exec: () => Promise.resolve({ code: 0 }) }, E);
