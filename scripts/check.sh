@@ -153,6 +153,20 @@ grep -Fq "runHelper(disableButton, 'disable'" "$root/luci/overview.js"
 # Disable is irreversible from this page, so it must ask and must point at Pause.
 grep -Fq 'ui.showModal(_(' "$root/luci/overview.js"
 grep -Fq 'use Pause instead' "$root/luci/overview.js"
+# Removal is named for what it does, and the reversible action sits beside it.
+grep -Fq "_('Remove link')" "$root/luci/overview.js"
+if grep -Fq "_('Apply and connect')" "$root/luci/overview.js"; then
+	echo 'apply still claims to connect' >&2
+	exit 1
+fi
+grep -Fq "runHelper(reconnectButton, 'connect'" "$root/luci/overview.js"
+# The overview must be translated, not only the policy page.
+for phrase in 'Running state' 'Remove link' 'Reconnect' 'Peer secret'; do
+	grep -Fq "'$phrase':" "$root/luci/shared.js" || {
+		echo "overview string not translated: $phrase" >&2
+		exit 1
+	}
+done
 
 # Every live-traffic state transition is attributable in the system log.
 grep -Fq 'log_state_transition()' "$root/runtime/ikev2-site-link.sh"

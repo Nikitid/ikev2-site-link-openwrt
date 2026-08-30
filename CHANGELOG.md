@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 - 2026-08-30
+
+- Renamed Disable to Remove link and said in the confirmation exactly what it
+  deletes: the interface, the firewall zone and forwardings, the routing policy
+  and the applied state. It sat next to Pause and read as the same kind of
+  toggle, which it is not.
+- Split the actions by what they change. Pause, Resume and Remove decide whether
+  the link exists at all and stay at the top with the status; Reconnect and Apply
+  act on the running configuration and are now the only buttons at the bottom.
+  Apply no longer claims to connect.
+- Added Reconnect, which was reachable only from the command line.
+- Translated the overview page. Only the policy page had Russian strings.
+- Showed a spinner on a busy button instead of only greying it out, matching the
+  other application.
+
 ## 0.5.0 - 2026-08-30
 
 - Rebuilt the overview on the application's own design system instead of stock
