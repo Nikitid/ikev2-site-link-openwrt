@@ -245,6 +245,7 @@ for dependency in ip-full strongswan-charon strongswan-mod-eap-mschapv2 \
 	grep -Fq "$dependency" "$root/scripts/build-apk.sh"
 done
 
+"$root/scripts/check-index.sh"
 "$root/scripts/test-runtime.sh"
 "$root/scripts/test-package-lifecycle.sh"
 "$root/scripts/test-policy.sh"
