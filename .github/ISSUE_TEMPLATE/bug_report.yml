@@ -1,0 +1,43 @@
+name: Bug report
+description: Something does not work as documented
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        English or Russian is fine. Remove passwords, keys, public addresses
+        and private domains from everything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Run `apk info luci-app-ikev2-site-link` on the router.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: OpenWrt 25.12.x, mediatek/filogic, router model, entry or exit role
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostic output
+      description: Sanitized output of `/usr/libexec/ikev2-site-link status` and `check`.
+      render: shell

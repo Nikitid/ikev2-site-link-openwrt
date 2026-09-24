@@ -1,52 +1,41 @@
-# IKEv2 Site Link для OpenWrt
+# IKEv2 Site Link for OpenWrt
 
-[English](README.en.md)
+[Русский](README.ru.md)
 
-Приложение LuCI, которое отправляет выбранные сервисы и адреса с одного
-роутера OpenWrt через другой по IKEv2. Исходный сценарий: трафик YouTube с
-офисного роутера идёт через домашний, а домашний продолжает применять к нему
-свою обычную стратегию обхода DPI.
+[![CI](https://github.com/Nikitid/luci-app-ikev2-site-link/actions/workflows/ci.yml/badge.svg)](https://github.com/Nikitid/luci-app-ikev2-site-link/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Nikitid/luci-app-ikev2-site-link)](https://github.com/Nikitid/luci-app-ikev2-site-link/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Две роли
+The `luci-app-ikev2-site-link` package is a LuCI application that sends selected
+services and addresses from one OpenWrt router out through another over IKEv2.
+The original case: YouTube traffic from an office router leaves through a home
+router, which keeps applying its usual DPI-circumvention strategy to it.
 
-- **`source`** — сторона, которая отдаёт трафик в туннель. Владеет исходящим
-  подключением, отдельным интерфейсом PBR, SNAT и таблицей маршрутизации,
-  закрытой по отказу: пока туннель недоступен, выбранный трафик не уходит в
-  обычный WAN, а упирается в недостижимый маршрут.
-- **`exit`** — сторона, которая выпускает трафик наружу. Держит собственный
-  отвечающий профиль strongSwan со строгим совпадением идентичности, свой
-  XFRM-интерфейс и пул из одного адреса. Её зона межсетевого экрана умеет
-  пересылать только в обычный WAN — ни к роутеру, ни в LAN хода нет.
+## Features
 
-Обе роли ставятся из одного пакета; роль выбирается в настройках.
+- one package, two roles - `source` and `exit` - chosen in the settings;
+- fail-closed: while the tunnel is down, selected traffic never falls back to
+  the plain WAN;
+- services and addresses are chosen on the **Policy Routing** page, applied
+  atomically with a checked PBR reload;
+- a reversible pause that keeps the verified configuration, and a full
+  disable;
+- shared-secret rotation during which the exit keeps its established SA;
+- works on its own, without the IKEv2 Manager package.
 
-Подробности — зачем именно так, что гарантирует рантайм и где проходят границы
-ответственности — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+## Requirements
 
-## Связь с IKEv2 Manager
+- OpenWrt `25.12.5`, `mediatek/filogic`, `aarch64_cortex-a53` - as for the rest
+  of the feed;
+- `pbr` with strict enforcement, and on the `source` side the
+  `dnsmasq.nftset` resolver;
+- the same `ike_port` on both routers (UDP/1500 by default);
+- a dedicated `/32` tunnel address that overlaps neither the LAN nor a VPN pool.
 
-Зависимости от пакета IKEv2 Manager нет: Site Link ставится и работает
-самостоятельно. Он переиспользует только два файла сертификата на выходной
-стороне (`/etc/swanctl/x509/ikev2.pem` и `/etc/swanctl/private/ikev2.key`),
-которые обычно ведёт Manager. Без него их жизненный цикл поддерживает
-администратор.
+## Installation
 
-Глобальные настройки PBR и DNS Site Link проверяет и сообщает о расхождении, но
-во владение не берёт.
-
-## Требования
-
-- OpenWrt `25.12.5`, `mediatek/filogic`, `aarch64_cortex-a53` — как и остальной
-  фид;
-- `pbr` с включённым строгим режимом, на стороне `source` — с резолвером
-  `dnsmasq.nftset`;
-- один и тот же `ike_port` на обоих роутерах (по умолчанию UDP/1500);
-- выделенный адрес туннеля `/32`, не пересекающийся с LAN и пулами VPN.
-
-## Установка
-
-Пакет публикуется в общий подписанный фид: один якорь доверия и одна запись
-фида на все приложения OpenWrt от Nikitid.
+The package is published through the shared signed feed: one trust anchor and
+one feed entry for every Nikitid OpenWrt application.
 
 ```sh
 wget -O /tmp/nikitid-feed.sh \
@@ -54,15 +43,42 @@ wget -O /tmp/nikitid-feed.sh \
 sh /tmp/nikitid-feed.sh luci-app-ikev2-site-link
 ```
 
-Если роутер уже доверяет фиду, достаточно обновления с явным именем пакета.
-Роутер целиком не обновляется никогда:
+If the router already trusts the feed, a scoped upgrade is enough. The whole
+router is never upgraded:
 
 ```sh
 apk update
 apk upgrade luci-app-ikev2-site-link
 ```
 
-## Команды
+## Two roles
+
+- **`source`** - the side that hands traffic to the tunnel. It owns the
+  outbound connection, a dedicated PBR interface, SNAT and a fail-closed
+  routing table: while the tunnel is down the selected traffic does not fall
+  back to the ordinary WAN, it hits an unreachable route.
+- **`exit`** - the side that puts traffic on the internet. It runs its own
+  strongSwan responder with exact identity matching, its own XFRM interface and
+  a single-address pool. Its firewall zone can forward only to the ordinary
+  WAN - not to the router, not to the LAN.
+
+Both roles ship in one package; the role is chosen in the settings.
+
+Why it is built this way, what the runtime guarantees and where the ownership
+boundaries run: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Relation to IKEv2 Manager
+
+There is no package dependency on IKEv2 Manager: Site Link installs and runs on
+its own. It reuses only two certificate files on the exit side
+(`/etc/swanctl/x509/ikev2.pem` and `/etc/swanctl/private/ikev2.key`), which
+Manager normally maintains. Without it, an administrator maintains their
+lifecycle.
+
+Site Link checks the global PBR and DNS contract and reports a mismatch, but
+never takes ownership of it.
+
+## Commands
 
 ```sh
 /usr/libexec/ikev2-site-link status
@@ -74,53 +90,57 @@ apk upgrade luci-app-ikev2-site-link
 /usr/libexec/ikev2-site-link secret-rollback
 ```
 
-Настройки связи лежат в `/etc/config/ikev2-site-link`. Состояние политики,
-ручные назначения, выбор сервисов, кеши и созданные администратором определения
-сервисов — в `/etc/ikev2-site-link/`. Страница **Policy Routing** в LuCI меняет
-их атомарно и перезагружает PBR с проверкой, под общей блокировкой сетевых
-действий. На выходном роутере тот же каталог виден, но доступен только для
-чтения.
+Link configuration lives in `/etc/config/ikev2-site-link`. Policy state, manual
+destinations, service selection, caches and administrator-created service
+definitions are under `/etc/ikev2-site-link/`. The **Policy Routing** page
+updates them atomically and performs a checked PBR reload under the shared
+network action lock. On an exit router the same catalogue is visible but
+read-only.
 
-## Пауза и отключение
+## Pause and disable
 
-**Пауза** — обратимая: разрывает SA, останавливает монитор и снимает флаг
-включения с политики PBR, поэтому выбранный трафик возвращается в WAN этого
-роутера вместо недостижимого маршрута. Применённый снимок, сгенерированные
-секции сети и файрвола, XFRM-устройство и секрет пира сохраняются, так что
-возобновление восстанавливает уже проверенную конфигурацию без ввода форм.
+**Pause** is reversible: it terminates the SAs, stops the monitor and clears
+PBR's own enable flag on the site-link policy, so selected traffic returns to
+this router's WAN instead of the fail-closed route. The applied snapshot, the
+generated network and firewall sections, the XFRM device and the peer secret
+are all retained, so Resume restores a configuration that was already verified,
+with no form input.
 
-**Отключение** — полный демонтаж независимо от роли: оба профиля, SA,
-XFRM-устройства, правила политики и кеш DNS-множеств. Пока связь на паузе,
-монитор ничего не чинит; Apply паузу снимает.
+**Disable** is a complete role-independent teardown: both profiles, the SAs,
+the XFRM devices, the policy rules and the cached DNS-set state. The monitor
+performs no repair while the link is paused, and Apply clears the pause.
 
-## Смена секрета
+## Secret rotation
 
-Ротация секрета — осознанное действие оператора на двух роутерах, а не протокол
-согласования. Пропишите одно и то же значение на обоих, активируйте сначала
-выход, затем источник. Выход при этом сохраняет установленную SA. Если
-аутентификация на источнике не прошла, он откатится к своему прежнему секрету —
-на выходе тогда нужно выполнить `secret-rollback` вручную.
+Rotation is a deliberate two-router operator action, not a pairing protocol.
+Stage the same value on both, activate the exit, then activate the source. The
+exit keeps its established SA through the handoff. If source authentication
+fails it restores its own previous secret - the exit then needs
+`secret-rollback` run by hand.
 
-## Сборка релиза
-
-Тег `v<версия>` собирает APK закреплённым SDK OpenWrt, подписывает общим
-издательским ключом и публикует как ассет релиза. Фид забирает ассет и
-пересобирает подписанный индекс; этот репозиторий в фид не пишет.
-
-Ручная сборка требует SDK и приватной половины издательского ключа:
+## Development
 
 ```sh
-OPENWRT_SDK_DIR=/path/to/openwrt-sdk \
-OPENWRT_APK_SIGNING_KEY=/path/to/release.pem \
-  ./scripts/build-apk.sh
+./scripts/check.sh
 ```
 
-Идентичность сборки и фида — в [`apk-feed.env`](apk-feed.env),
-`keys/nikitid-openwrt-release.pem` — публичный ключ издателя.
+Building, signing and releasing: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-## Документация
+## Documentation
 
-- [Карта репозитория](docs/MAP.md) — где что лежит
-- [Индекс функций](docs/INDEX.md) — генерируется, ищется грепом
-- [Ловушки](docs/TRAPS.md) — ошибки, которые уже стоили часов
-- [Архитектура](docs/ARCHITECTURE.md)
+- [Repository map](docs/MAP.md) - where things live
+- [Traps](docs/TRAPS.md) - failures that already cost hours
+- [Architecture](docs/ARCHITECTURE.md)
+- [Development](docs/DEVELOPMENT.md) - building, signing and releasing
+
+## Support
+
+Questions and bug reports go to
+[Issues](https://github.com/Nikitid/luci-app-ikev2-site-link/issues/new/choose): pick the form that
+fits. Report a vulnerability privately through
+[a security advisory](https://github.com/Nikitid/luci-app-ikev2-site-link/security/advisories/new).
+English or Russian is fine.
+
+## License
+
+[MIT](LICENSE)

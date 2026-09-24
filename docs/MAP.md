@@ -1,7 +1,6 @@
 # Repository map
 
 Where things live, so a task starts at the right file instead of a search.
-Pair it with `docs/INDEX.md`, which locates a function by name.
 
 ## The shape of it
 
@@ -49,7 +48,7 @@ Note: these resource names carry no version suffix. See `docs/TRAPS.md`.
 ## Checks
 
 `scripts/check.sh` runs everything: its own inline contract assertions first,
-then `check-index.sh`, `test-runtime.sh`, `test-package-lifecycle.sh`,
+then `check-readme.sh`, `test-runtime.sh`, `test-package-lifecycle.sh`,
 `test-policy.sh` and `test-recovery.sh`. The UI harnesses
 (`test-overview-ui.sh`, `test-policy-ui.sh`, `test-translations.sh`) stub LuCI
 and actually render the pages.
@@ -67,3 +66,5 @@ Both packages live on the same router and both touch PBR, firewall and XFRM.
 The contract is that each keeps its own last applied state and neither tears
 down what it did not create. When changing anything that writes routing rules,
 check the sibling repository for the other half of the contract.
+
+Building, signing and releasing are in `docs/DEVELOPMENT.md`.
