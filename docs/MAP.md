@@ -6,8 +6,8 @@ Where things live, so a task starts at the right file instead of a search.
 
 One OpenWrt package, `luci-app-ikev2-site-link`: a site-to-site IKEv2 link
 between two routers, with its own policy routing for the traffic that crosses
-it. It ships and releases independently of `ikev2-openwrt`, but shares a router
-with it - see the ownership note below.
+it. It ships and releases independently of `luci-app-ikev2-manager`, but
+shares a router with it - see the ownership note below.
 
 A link has a **role**: `exit` publishes the far side's route out, `source`
 sends selected traffic into it.
@@ -60,7 +60,7 @@ and `check-version-sync.sh` fails on drift. `scripts/build-apk.sh` builds the
 signed APK through `stage-package.sh`. The release workflow publishes it, and
 `Nikitid/openwrt-feed` collects it into the shared feed.
 
-## Shared ownership with ikev2-openwrt
+## Shared ownership with luci-app-ikev2-manager
 
 Both packages live on the same router and both touch PBR, firewall and XFRM.
 The contract is that each keeps its own last applied state and neither tears
