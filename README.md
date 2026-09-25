@@ -11,6 +11,8 @@ services and addresses from one OpenWrt router out through another over IKEv2.
 The original case: YouTube traffic from an office router leaves through a home
 router, which keeps applying its usual DPI-circumvention strategy to it.
 
+![IKEv2 Site Link overview page on an exit router](docs/images/overview.png)
+
 ## Features
 
 - one package, two roles - `source` and `exit` - chosen in the settings;
