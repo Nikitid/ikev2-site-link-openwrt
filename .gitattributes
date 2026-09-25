@@ -13,3 +13,7 @@ Makefile text eol=lf
 *.gz binary
 *.zst binary
 *.pem text eol=lf
+
+# Shared scripts vendored from repo-templates: kept out of the language stats.
+scripts/check-readme.sh linguist-vendored
+scripts/release-notes.sh linguist-vendored
